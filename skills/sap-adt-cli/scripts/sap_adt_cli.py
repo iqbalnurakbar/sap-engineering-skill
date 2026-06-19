@@ -29,7 +29,7 @@ _ensure_deps()
 sys.path.insert(0, _SKILL_SCRIPTS_DIR)
 
 import click
-from lib.config import run_configure_wizard, save_config_from_flags, load_config, CONFIG_FILE, SapConfig
+from lib.config import run_configure_wizard, save_config_from_flags, load_config, load_config_with_source, SapConfig
 from lib import handlers
 
 __version__ = "1.1.1"
@@ -113,7 +113,8 @@ def cli():
     """Read and write ABAP source code and metadata from SAP systems via the ADT REST API.
 
     Credentials are loaded from environment variables (SAP_URL, SAP_USERNAME,
-    SAP_PASSWORD, SAP_CLIENT) or from ~/.sap-adt-cli/config.json.
+    SAP_PASSWORD, SAP_CLIENT), the SKILL-local .env file, or
+    ~/.sap-adt-cli/config.json.
 
     Run 'configure' on first use to save your connection settings.
     """
@@ -165,7 +166,7 @@ def configure(url, username, password, client, language, no_verify_ssl, allow_wr
 @cli.command()
 def status():
     """Show the current SAP connection configuration."""
-    config = load_config()
+    config, source = load_config_with_source()
     if config is None:
         click.echo("Not configured. Run: sap-adt-cli configure", err=True)
         sys.exit(1)
@@ -176,7 +177,7 @@ def status():
     click.echo(f"SSL:             {'verify' if config.verify_ssl else 'skip (self-signed allowed)'}")
     click.echo(f"Write mode:      {'ENABLED' if config.allow_write else 'DISABLED'}")
     click.echo(f"Transport write: {'ENABLED' if config.allow_transport else 'DISABLED'}")
-    click.echo(f"Config:          {CONFIG_FILE}")
+    click.echo(f"Config source:   {source}")
 
 
 @cli.command("get-program")

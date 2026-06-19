@@ -91,7 +91,7 @@ SAP 集团        — 3 位集团编号，例如 100
 跳过 SSL 验证？  — 内网或自签名证书环境选 yes
 ```
 
-凭据保存至 `~\.sap-adt-cli\config.json`，后续会话自动复用。
+凭据可从进程环境变量、SKILL 目录下的 `.env` 或 `~\.sap-adt-cli\config.json` 加载，后续会话自动复用。
 
 ### 支持的 AI 智能体
 
@@ -133,7 +133,23 @@ python3 skills/sap-adt-cli/scripts/sap_adt_cli.py get-function BAPI_SALESORDER_C
 
 ## 配置
 
-### 交互式向导（推荐）
+凭据查找顺序为：
+
+1. 进程环境变量
+2. `skills/sap-adt-cli/.env`
+3. `~/.sap-adt-cli/config.json`
+
+### SKILL 本地 `.env`（推荐用于技能隔离）
+
+```bash
+cp skills/sap-adt-cli/.env.example skills/sap-adt-cli/.env
+# 编辑 skills/sap-adt-cli/.env，填写 SAP_URL、SAP_USERNAME、SAP_PASSWORD、SAP_CLIENT
+python3 skills/sap-adt-cli/scripts/sap_adt_cli.py status
+```
+
+不要提交真实 `.env` 文件。
+
+### 交互式向导
 
 ```bash
 python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
@@ -146,7 +162,7 @@ python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
 
 ### 环境变量
 
-适用于 CI/CD 流水线或临时会话。环境变量优先级高于配置文件。
+适用于 CI/CD 流水线或临时会话。环境变量优先级高于 SKILL 本地 `.env` 和配置文件。
 
 ```bash
 export SAP_URL=https://my-sap.example.com:8000
@@ -155,6 +171,8 @@ export SAP_PASSWORD=secret          # 推荐使用此方式，避免 --password 
 export SAP_CLIENT=100
 export SAP_LANGUAGE=EN              # 可选，默认：EN
 export SAP_VERIFY_SSL=0             # 可选：设为 0 以跳过自签名证书验证
+export SAP_ALLOW_WRITE=0            # 可选：设为 1 以开启 write-source/activate
+export SAP_ALLOW_TRANSPORT=0        # 可选：设为 1 以开启 create/release transport
 ```
 
 ### 能力标志（默认：关闭）
@@ -320,8 +338,8 @@ python3 $CLI release-transport DEVK900001                           # 需 allow_
 
 ## 安全注意事项
 
-- 凭据以**明文**存储在 `~/.sap-adt-cli/config.json` 中（权限 `0600`）。  
-  这与常见 CLI 工具（AWS CLI、Azure CLI）的做法一致。请限制文件访问权限。
+- `skills/sap-adt-cli/.env` 或 `~/.sap-adt-cli/config.json` 中的凭据均为**明文**。
+  请勿提交 `.env`，并限制 JSON 配置文件访问权限（`0600`）。
 - 避免通过 `--password` 参数传递密码——它会出现在 Shell 历史记录和 `ps` 输出中。  
   推荐使用交互式 `configure` 向导或 `SAP_PASSWORD` 环境变量。
 - 写入与传输命令需要显式开启能力标志（`allow_write`、`allow_transport`）并逐次 `[y/N]` 确认。  

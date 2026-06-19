@@ -1,0 +1,9 @@
+# Credentials - NEVER commit
+.env
+*.env.local
+
+# Runtime output and Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

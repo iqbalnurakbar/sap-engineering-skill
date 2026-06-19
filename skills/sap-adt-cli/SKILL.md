@@ -62,7 +62,7 @@ Language:        EN
 SSL:             verify
 Write mode:      DISABLED
 Transport write: DISABLED
-Config:          /home/user/.sap-adt-cli/config.json
+Config source:   /home/user/.sap-adt-cli/config.json
 ```
 
 ### Credentials NOT configured → collect and save non-interactively
@@ -151,16 +151,27 @@ SAP_PASSWORD="mysecret" python3 "$SAP_CLI" configure \
 > (e.g. a trusted CI pipeline). Never pass `--yes` on behalf of the user
 > based on a previous confirmation in the same conversation.
 
-> **Security note:** inform the user that credentials are stored in plain text in `~/.sap-adt-cli/config.json`.
-> The file is protected with `0600` permissions but is not encrypted.
+> **Security note:** inform the user that credentials stored in SKILL-local `.env`
+> or `~/.sap-adt-cli/config.json` are plain text. The JSON config file is
+> protected with `0600` permissions but is not encrypted.
 
-**Alternative — env vars per invocation** (no file written, useful for one-off sessions):
+**Alternative A — SKILL-local `.env`** (recommended for per-skill isolation):
+
+```bash
+cp "$(dirname "$SAP_CLI")/../.env.example" "$(dirname "$SAP_CLI")/../.env"
+# edit .env and fill SAP_URL, SAP_USERNAME, SAP_PASSWORD, SAP_CLIENT
+python3 "$SAP_CLI" status
+```
+
+**Alternative B — env vars per invocation** (no file written, useful for one-off sessions):
 
 ```bash
 SAP_URL="https://..." SAP_USERNAME="USER" SAP_PASSWORD="pass" SAP_CLIENT="100" python3 "$SAP_CLI" status
 ```
 
-Env vars take precedence over the saved config file.
+Credential precedence is: process env vars > SKILL-local `.env` > `~/.sap-adt-cli/config.json`.
+Capability flags map to `SAP_ALLOW_WRITE` and `SAP_ALLOW_TRANSPORT`; keep both `0`
+unless the user explicitly authorizes write or transport operations.
 
 ---
 
@@ -255,7 +266,7 @@ python3 "$SAP_CLI" release-transport DEVK900001 --yes     # skip confirm (truste
 - **`get-type-info` fallback**: tries domain first; if not found, falls back to data element
 - **SSL**: for internal SAP systems with self-signed certs, configure with SSL disabled (`SAP_VERIFY_SSL=0` or answer "n" in wizard)
 - **Session reuse**: the HTTP session is reused within a single script invocation; each `python3 "$SAP_CLI" ...` call starts fresh
-- **Credentials precedence**: env vars > `~/.sap-adt-cli/config.json`
+- **Credentials precedence**: process env vars > SKILL-local `.env` > `~/.sap-adt-cli/config.json`
 - **Capability flags — config layer**: `write-source` and `activate` require `allow_write: true`;
   `create-transport` and `release-transport` require `allow_transport: true`.
   Run `configure` to enable. `list-transports` is read-only and has no flag requirement.

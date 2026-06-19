@@ -97,7 +97,8 @@ SAP Client        — 3-digit client number (e.g. 100)
 Skip SSL check?   — yes for self-signed / internal certs
 ```
 
-Credentials are saved to `~\.sap-adt-cli\config.json` and reused in all subsequent sessions.
+Credentials can be loaded from process environment variables, a SKILL-local `.env`,
+or `~\.sap-adt-cli\config.json` and reused in subsequent sessions.
 
 ### Compatible AI agents
 
@@ -140,7 +141,23 @@ python3 skills/sap-adt-cli/scripts/sap_adt_cli.py get-function BAPI_SALESORDER_C
 
 ## Configuration
 
-### Interactive wizard (recommended)
+Credential lookup order is:
+
+1. Process environment variables
+2. `skills/sap-adt-cli/.env`
+3. `~/.sap-adt-cli/config.json`
+
+### SKILL-local `.env` (recommended for per-skill isolation)
+
+```bash
+cp skills/sap-adt-cli/.env.example skills/sap-adt-cli/.env
+# edit skills/sap-adt-cli/.env and fill SAP_URL, SAP_USERNAME, SAP_PASSWORD, SAP_CLIENT
+python3 skills/sap-adt-cli/scripts/sap_adt_cli.py status
+```
+
+Never commit the real `.env` file.
+
+### Interactive wizard
 
 ```bash
 python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
@@ -154,7 +171,7 @@ Credentials are saved to `~/.sap-adt-cli/config.json` with `0600` permissions.
 ### Environment variables
 
 Useful for CI/CD pipelines or one-off sessions. Environment variables take
-precedence over the saved config file.
+precedence over both the SKILL-local `.env` and the saved config file.
 
 ```bash
 export SAP_URL=https://my-sap.example.com:8000
@@ -163,6 +180,8 @@ export SAP_PASSWORD=secret          # prefer this over the --password flag
 export SAP_CLIENT=100
 export SAP_LANGUAGE=EN              # optional, default: EN
 export SAP_VERIFY_SSL=0             # optional: set 0 for self-signed certificates
+export SAP_ALLOW_WRITE=0            # optional: set 1 to enable write-source/activate
+export SAP_ALLOW_TRANSPORT=0        # optional: set 1 to enable create/release transport
 ```
 
 ### Capability flags (default: disabled)
@@ -332,8 +351,8 @@ All output is written to **stdout**. Errors are written to **stderr** with a non
 
 ## Security Considerations
 
-- Credentials are stored **in plain text** in `~/.sap-adt-cli/config.json` (permissions `0600`).
-  This is consistent with common CLI tools (AWS CLI, Azure CLI). Restrict file access accordingly.
+- Credentials stored in `skills/sap-adt-cli/.env` or `~/.sap-adt-cli/config.json` are **plain text**.
+  Do not commit `.env`; restrict access to the JSON config file (`0600`).
 - Avoid passing passwords via `--password` — they appear in shell history and `ps` output.
   Prefer the interactive `configure` wizard or the `SAP_PASSWORD` environment variable.
 - Write and transport commands require explicit capability flags (`allow_write`, `allow_transport`)
