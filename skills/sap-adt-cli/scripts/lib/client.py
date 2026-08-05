@@ -19,7 +19,18 @@ def _get_session() -> requests.Session:
 
 
 def _auth_headers(config: SapConfig) -> dict:
+    # Send the SAP client as both the X-SAP-Client header and the sap-client
+    # URL parameter. Some SAP setups (Web Dispatcher, ICF configuration)
+    # only honor the URL parameter, in which case sending only the header
+    # results in HTTP 403 SADT_RESOURCE 003 without any AUTHORITY-CHECK
+    # trace on the backend. Sending both is safe and portable.
     return {"X-SAP-Client": config.client}
+
+
+def _client_query_params(config: SapConfig, existing: Optional[dict] = None) -> dict:
+    params = dict(existing) if existing else {}
+    params.setdefault("sap-client", config.client)
+    return params
 
 
 def _fetch_csrf_token(url: str, config: SapConfig) -> str:
@@ -28,6 +39,7 @@ def _fetch_csrf_token(url: str, config: SapConfig) -> str:
         url,
         auth=HTTPBasicAuth(config.username, config.password),
         headers={**_auth_headers(config), "x-csrf-token": "fetch"},
+        params=_client_query_params(config),
         verify=config.verify_ssl,
         timeout=30,
     )
@@ -72,7 +84,7 @@ def make_adt_request(
             verify=config.verify_ssl,
             timeout=timeout,
             data=data,
-            params=params,
+            params=_client_query_params(config, params),
             cookies=_session_cookies or {},
         )
 
