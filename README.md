@@ -12,7 +12,7 @@
 
 Each skill follows the standard `SKILL.md` specification and works with any compatible AI agent framework — [opencode](https://opencode.ai), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Cursor, or any framework that supports custom tool/skill injection.
 
-The three subtree skills are also maintained as independent public repositories so they can be used standalone.
+The skills `abap-code-review`, `sap-transport-gate`, and `sap-integration-wiki` were previously maintained as standalone public repositories. Those repositories are now **archived** (read-only) - all future updates happen exclusively in this monorepo.
 
 ---
 
@@ -31,7 +31,7 @@ A command-line tool and AI agent skill for reading **and writing** ABAP source c
 
 ---
 
-### [`abap-code-review`](skills/abap-code-review/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/abap-code-review)
+### [`abap-code-review`](skills/abap-code-review/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-engineering-skill/tree/main/skills/abap-code-review)
 
 An AI agent skill for SAP ABAP pre-release code review. Performs a comprehensive security and quality assessment across **9 dimensions** and produces a formal, sign-off-ready Markdown report.
 
@@ -51,7 +51,7 @@ An AI agent skill for SAP ABAP pre-release code review. Performs a comprehensive
 
 ---
 
-### [`sap-transport-gate`](skills/sap-transport-gate/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-transport-gate)
+### [`sap-transport-gate`](skills/sap-transport-gate/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-engineering-skill/tree/main/skills/sap-transport-gate)
 
 An AI agent skill that performs structured, evidence-driven release readiness assessment for SAP Transport Requests. Produces an auditable `GO / CONDITIONAL_GO / NO_GO / NEED_MORE_EVIDENCE` decision.
 
@@ -66,7 +66,7 @@ Covers **10 review dimensions**: code quality, performance, security, authorizat
 
 ---
 
-### [`sap-integration-wiki`](skills/sap-integration-wiki/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-integration-wiki)
+### [`sap-integration-wiki`](skills/sap-integration-wiki/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-engineering-skill/tree/main/skills/sap-integration-wiki)
 
 A composable knowledge-base skill that turns any AI assistant into a SAP integration specialist. Covers 9 business domains and 8 integration technologies — no more generic wrong answers.
 
@@ -88,18 +88,18 @@ sap-engineering-skill/
 ├── setup-opencode-abap-cli.bat       ← Windows one-click installer
 └── skills/
     ├── sap-adt-cli/             ← ADT CLI tool & skill (source in this repo)
-    ├── abap-code-review/        ← ABAP code review skill  [git subtree]
-    ├── sap-transport-gate/      ← Transport gate review skill  [git subtree]
-    └── sap-integration-wiki/    ← SAP integration knowledge base  [git subtree]
+    ├── abap-code-review/        ← ABAP code review skill
+    ├── sap-transport-gate/      ← Transport gate review skill
+    └── sap-integration-wiki/    ← SAP integration knowledge base
 ```
 
-The three subtree skills are tracked via named git remotes:
+The three skills above were historically tracked as git subtrees from standalone public repositories, which are now **archived** (read-only). All updates are maintained in this repo:
 
-| Remote                     | Repository                                           |
-| -------------------------- | ---------------------------------------------------- |
-| `pub-abap-code-review`     | https://github.com/shrek-abaper/abap-code-review     |
-| `pub-sap-transport-gate`   | https://github.com/shrek-abaper/sap-transport-gate   |
-| `pub-sap-integration-wiki` | https://github.com/shrek-abaper/sap-integration-wiki |
+| Standalone repository (archived)              | Migrated to                                            |
+| --------------------------------------------- | ------------------------------------------------------ |
+| https://github.com/shrek-abaper/abap-code-review     | [`skills/abap-code-review/`](skills/abap-code-review/)     |
+| https://github.com/shrek-abaper/sap-transport-gate   | [`skills/sap-transport-gate/`](skills/sap-transport-gate/) |
+| https://github.com/shrek-abaper/sap-integration-wiki | [`skills/sap-integration-wiki/`](skills/sap-integration-wiki/) |
 
 ---
 

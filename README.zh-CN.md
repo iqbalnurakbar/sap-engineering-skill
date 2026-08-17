@@ -12,7 +12,7 @@
 
 每个 Skill 遵循标准 `SKILL.md` 规范，兼容任何支持自定义工具/Skill 注入的 AI Agent 框架——[opencode](https://opencode.ai)、[Claude Code](https://docs.anthropic.com/en/docs/claude-code)、Cursor 或其他框架。
 
-三个子树 Skill 同时作为独立公开仓库维护，可单独使用。
+`abap-code-review`、`sap-transport-gate`、`sap-integration-wiki` 三个 Skill 此前作为独立公开仓库维护。这些独立仓库现已**归档**（只读）--后续所有更新仅在本 Monorepo 中进行。
 
 ---
 
@@ -31,7 +31,7 @@
 
 ---
 
-### [`abap-code-review`](skills/abap-code-review/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/abap-code-review)
+### [`abap-code-review`](skills/abap-code-review/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-engineering-skill/tree/main/skills/abap-code-review)
 
 SAP ABAP 上线前代码审查 AI Agent Skill。对 **9 个维度**进行安全与质量全面评估，生成正式的、可供签字的 Markdown 审查报告。
 
@@ -51,7 +51,7 @@ SAP ABAP 上线前代码审查 AI Agent Skill。对 **9 个维度**进行安全�
 
 ---
 
-### [`sap-transport-gate`](skills/sap-transport-gate/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-transport-gate)
+### [`sap-transport-gate`](skills/sap-transport-gate/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-engineering-skill/tree/main/skills/sap-transport-gate)
 
 对 SAP 传输请求进行结构化、证据驱动上线就绪评估的 AI Agent Skill，产出可审计的 `GO / CONDITIONAL_GO / NO_GO / NEED_MORE_EVIDENCE` 决策。
 
@@ -66,7 +66,7 @@ SAP ABAP 上线前代码审查 AI Agent Skill。对 **9 个维度**进行安全�
 
 ---
 
-### [`sap-integration-wiki`](skills/sap-integration-wiki/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-integration-wiki)
+### [`sap-integration-wiki`](skills/sap-integration-wiki/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-engineering-skill/tree/main/skills/sap-integration-wiki)
 
 将任意 AI 助手变成 SAP 集成专家的可组合知识库 Skill。覆盖 9 个业务领域和 8 种集成技术，告别泛泛而错的通用回答。
 
@@ -88,18 +88,18 @@ sap-engineering-skill/
 ├── setup-opencode-abap-cli.bat       ← Windows 一键安装脚本
 └── skills/
     ├── sap-adt-cli/             ← ADT CLI 工具与 Skill（源码位于本仓库）
-    ├── abap-code-review/        ← ABAP 代码审查 Skill  [git subtree]
-    ├── sap-transport-gate/      ← 传输请求上线门控 Skill  [git subtree]
-    └── sap-integration-wiki/    ← SAP 集成知识库 Skill  [git subtree]
+    ├── abap-code-review/        ← ABAP 代码审查 Skill
+    ├── sap-transport-gate/      ← 传输请求上线门控 Skill
+    └── sap-integration-wiki/    ← SAP 集成知识库 Skill
 ```
 
-三个子树 Skill 通过命名 git remote 进行跟踪：
+上述三个 Skill 历史上以 git subtree 形式关联独立公开仓库，这些独立仓库现已**归档**（只读），后续所有更新仅在本仓库维护：
 
-| Remote                     | 仓库地址                                             |
-| -------------------------- | ---------------------------------------------------- |
-| `pub-abap-code-review`     | https://github.com/shrek-abaper/abap-code-review     |
-| `pub-sap-transport-gate`   | https://github.com/shrek-abaper/sap-transport-gate   |
-| `pub-sap-integration-wiki` | https://github.com/shrek-abaper/sap-integration-wiki |
+| 独立仓库（已归档）                     | 迁移至                                                  |
+| -------------------------------------- | ------------------------------------------------------- |
+| https://github.com/shrek-abaper/abap-code-review     | [`skills/abap-code-review/`](skills/abap-code-review/)     |
+| https://github.com/shrek-abaper/sap-transport-gate   | [`skills/sap-transport-gate/`](skills/sap-transport-gate/) |
+| https://github.com/shrek-abaper/sap-integration-wiki | [`skills/sap-integration-wiki/`](skills/sap-integration-wiki/) |
 
 ---
 
