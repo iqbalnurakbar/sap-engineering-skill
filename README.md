@@ -18,7 +18,7 @@ The three subtree skills are also maintained as independent public repositories 
 
 ## Skills
 
-### [`sap-adt-cli`](skills/sap-adt-cli/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-engineering-skill)
+### [`sap-adt-cli`](skills/sap-adt-cli/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-engineering-skill/tree/main/skills/sap-adt-cli)
 
 A command-line tool and AI agent skill for reading **and writing** ABAP source code, metadata, and transport requests from SAP systems via the [ADT REST API](https://help.sap.com/docs/abap-cloud/abap-development-tools-user-guide/about-abap-development-tools).
 
@@ -35,17 +35,17 @@ A command-line tool and AI agent skill for reading **and writing** ABAP source c
 
 An AI agent skill for SAP ABAP pre-release code review. Performs a comprehensive security and quality assessment across **9 dimensions** and produces a formal, sign-off-ready Markdown report.
 
-| # | Dimension | Focus |
-|---|-----------|-------|
-| 1 | **[SEC]** Security | SQL injection, code injection, hardcoded credentials |
-| 2 | **[AUTH]** Authorization | Missing AUTHORITY-CHECK, bypass patterns |
-| 3 | **[DATA]** Data Integrity | SY-SUBRC handling, locking, exception handling |
-| 4 | **[PERF]** Performance | SELECT-in-LOOP, SELECT *, full table scans |
-| 5 | **[STD]** Code Standards | Deprecated statements, oversized methods, dead code |
-| 6 | **[INTERFACE]** Integration | Dialog in RFC FMs, missing EXCEPTIONS, OData auth |
-| 7 | **[CHANGE]** Change Impact | Affected tables, SAP standard modifications |
-| 8 | **[COMP]** Compliance | PII, audit logs, SoD paths |
-| 9 | **[FUNC]** Functional *(optional)* | Business scenario coverage vs. requirements |
+| #   | Dimension                          | Focus                                                |
+| --- | ---------------------------------- | ---------------------------------------------------- |
+| 1   | **[SEC]** Security                 | SQL injection, code injection, hardcoded credentials |
+| 2   | **[AUTH]** Authorization           | Missing AUTHORITY-CHECK, bypass patterns             |
+| 3   | **[DATA]** Data Integrity          | SY-SUBRC handling, locking, exception handling       |
+| 4   | **[PERF]** Performance             | SELECT-in-LOOP, SELECT *, full table scans           |
+| 5   | **[STD]** Code Standards           | Deprecated statements, oversized methods, dead code  |
+| 6   | **[INTERFACE]** Integration        | Dialog in RFC FMs, missing EXCEPTIONS, OData auth    |
+| 7   | **[CHANGE]** Change Impact         | Affected tables, SAP standard modifications          |
+| 8   | **[COMP]** Compliance              | PII, audit logs, SoD paths                           |
+| 9   | **[FUNC]** Functional *(optional)* | Business scenario coverage vs. requirements          |
 
 **Output**: `GO / CONDITIONAL GO / NO-GO` recommendation with evidence-cited findings and a sign-off table.
 
@@ -95,10 +95,10 @@ sap-engineering-skill/
 
 The three subtree skills are tracked via named git remotes:
 
-| Remote | Repository |
-|--------|-----------|
-| `pub-abap-code-review` | https://github.com/shrek-abaper/abap-code-review |
-| `pub-sap-transport-gate` | https://github.com/shrek-abaper/sap-transport-gate |
+| Remote                     | Repository                                           |
+| -------------------------- | ---------------------------------------------------- |
+| `pub-abap-code-review`     | https://github.com/shrek-abaper/abap-code-review     |
+| `pub-sap-transport-gate`   | https://github.com/shrek-abaper/sap-transport-gate   |
 | `pub-sap-integration-wiki` | https://github.com/shrek-abaper/sap-integration-wiki |
 
 ---
@@ -128,11 +128,11 @@ python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
 
 ### Compatible AI agents
 
-| Agent | Notes |
-|-------|-------|
-| [opencode](https://opencode.ai) | Free, open-source. Supports 30+ model providers. Windows installer included. |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Anthropic's official CLI agent — natively supports `SKILL.md` |
-| [Cursor](https://cursor.sh) | AI-powered code editor; install via MCP tool adapter |
+| Agent                                                         | Notes                                                                        |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| [opencode](https://opencode.ai)                               | Free, open-source. Supports 30+ model providers. Windows installer included. |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Anthropic's official CLI agent — natively supports `SKILL.md`                |
+| [Cursor](https://cursor.sh)                                   | AI-powered code editor; install via MCP tool adapter                         |
 
 > ⚠️ **Data compliance**: ABAP source code may contain core business logic and sensitive data. Before sending code to cloud-based AI services, confirm compliance with your organization's data security policy.
 
@@ -140,12 +140,12 @@ python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
 
 ## Skill Reference
 
-| Skill | Use When |
-|-------|----------|
-| `sap-adt-cli` | Read/write ABAP source, run SQL, manage transports via ADT API |
-| `abap-code-review` | Pre-release security & quality review of a single ABAP program (9 dimensions) |
-| `sap-transport-gate` | TR-level release gate assessment — evidence-based GO/NO-GO decision |
-| `sap-integration-wiki` | SAP integration patterns, API reference, troubleshooting by scenario |
+| Skill                  | Use When                                                                      |
+| ---------------------- | ----------------------------------------------------------------------------- |
+| `sap-adt-cli`          | Read/write ABAP source, run SQL, manage transports via ADT API                |
+| `abap-code-review`     | Pre-release security & quality review of a single ABAP program (9 dimensions) |
+| `sap-transport-gate`   | TR-level release gate assessment — evidence-based GO/NO-GO decision           |
+| `sap-integration-wiki` | SAP integration patterns, API reference, troubleshooting by scenario          |
 
 ---
 

@@ -18,7 +18,7 @@
 
 ## Skill 目录
 
-### [`sap-adt-cli`](skills/sap-adt-cli/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-engineering-skill)
+### [`sap-adt-cli`](skills/sap-adt-cli/) &nbsp;·&nbsp; [GitHub](https://github.com/shrek-abaper/sap-engineering-skill/tree/main/skills/sap-adt-cli)
 
 通过 [ADT REST API](https://help.sap.com/docs/abap-cloud/abap-development-tools-user-guide/about-abap-development-tools) 对 SAP 系统进行读写操作的命令行工具与 AI Agent Skill。
 
@@ -35,17 +35,17 @@
 
 SAP ABAP 上线前代码审查 AI Agent Skill。对 **9 个维度**进行安全与质量全面评估，生成正式的、可供签字的 Markdown 审查报告。
 
-| # | 维度 | 关注点 |
-|---|------|--------|
-| 1 | **[SEC]** 安全漏洞 | SQL 注入、代码注入、硬编码凭据 |
-| 2 | **[AUTH]** 授权与访问控制 | 缺少 AUTHORITY-CHECK、绕过模式 |
-| 3 | **[DATA]** 数据完整性 | SY-SUBRC 处理、锁机制、异常处理 |
-| 4 | **[PERF]** 性能风险 | LOOP 内 SELECT、SELECT *、全表扫描 |
-| 5 | **[STD]** 代码规范 | 废弃语句、超大方法、注释代码残留 |
-| 6 | **[INTERFACE]** 接口与集成 | RFC FM 中的对话框消息、缺少 EXCEPTIONS |
-| 7 | **[CHANGE]** 变更影响 | 受影响的表、SAP 标准对象修改 |
-| 8 | **[COMP]** 合规与审计 | 个人信息处理、审计日志、职责分离路径 |
-| 9 | **[FUNC]** 功能完整性 *(可选)* | 业务场景覆盖与需求对齐 |
+| #   | 维度                           | 关注点                                 |
+| --- | ------------------------------ | -------------------------------------- |
+| 1   | **[SEC]** 安全漏洞             | SQL 注入、代码注入、硬编码凭据         |
+| 2   | **[AUTH]** 授权与访问控制      | 缺少 AUTHORITY-CHECK、绕过模式         |
+| 3   | **[DATA]** 数据完整性          | SY-SUBRC 处理、锁机制、异常处理        |
+| 4   | **[PERF]** 性能风险            | LOOP 内 SELECT、SELECT *、全表扫描     |
+| 5   | **[STD]** 代码规范             | 废弃语句、超大方法、注释代码残留       |
+| 6   | **[INTERFACE]** 接口与集成     | RFC FM 中的对话框消息、缺少 EXCEPTIONS |
+| 7   | **[CHANGE]** 变更影响          | 受影响的表、SAP 标准对象修改           |
+| 8   | **[COMP]** 合规与审计          | 个人信息处理、审计日志、职责分离路径   |
+| 9   | **[FUNC]** 功能完整性 *(可选)* | 业务场景覆盖与需求对齐                 |
 
 **输出**：`GO / CONDITIONAL GO / NO-GO` 建议，附带证据引用的发现和签字表格。
 
@@ -95,10 +95,10 @@ sap-engineering-skill/
 
 三个子树 Skill 通过命名 git remote 进行跟踪：
 
-| Remote | 仓库地址 |
-|--------|---------|
-| `pub-abap-code-review` | https://github.com/shrek-abaper/abap-code-review |
-| `pub-sap-transport-gate` | https://github.com/shrek-abaper/sap-transport-gate |
+| Remote                     | 仓库地址                                             |
+| -------------------------- | ---------------------------------------------------- |
+| `pub-abap-code-review`     | https://github.com/shrek-abaper/abap-code-review     |
+| `pub-sap-transport-gate`   | https://github.com/shrek-abaper/sap-transport-gate   |
 | `pub-sap-integration-wiki` | https://github.com/shrek-abaper/sap-integration-wiki |
 
 ---
@@ -128,11 +128,11 @@ python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
 
 ### 兼容的 AI Agent
 
-| Agent | 说明 |
-|-------|------|
-| [opencode](https://opencode.ai) | 免费开源，支持 30+ 模型提供商，附 Windows 安装脚本 |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Anthropic 官方 CLI Agent，原生支持 `SKILL.md` |
-| [Cursor](https://cursor.sh) | AI 代码编辑器，通过 MCP Tool Adapter 安装 |
+| Agent                                                         | 说明                                               |
+| ------------------------------------------------------------- | -------------------------------------------------- |
+| [opencode](https://opencode.ai)                               | 免费开源，支持 30+ 模型提供商，附 Windows 安装脚本 |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Anthropic 官方 CLI Agent，原生支持 `SKILL.md`      |
+| [Cursor](https://cursor.sh)                                   | AI 代码编辑器，通过 MCP Tool Adapter 安装          |
 
 > ⚠️ **数据合规提示**：ABAP 源代码可能包含核心业务逻辑和敏感数据。在将代码发送至云端 AI 服务前，请确认符合组织数据安全策略。
 
@@ -140,12 +140,12 @@ python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
 
 ## Skill 速查
 
-| Skill | 适用场景 |
-|-------|---------|
-| `sap-adt-cli` | 通过 ADT API 读写 ABAP 源代码、执行 SQL、管理传输请求 |
-| `abap-code-review` | 单个 ABAP 程序上线前安全与质量审查（9 维度） |
-| `sap-transport-gate` | 传输请求上线门控评估——基于证据的 GO/NO-GO 决策 |
-| `sap-integration-wiki` | SAP 集成模式、API 参考、按场景故障排除 |
+| Skill                  | 适用场景                                              |
+| ---------------------- | ----------------------------------------------------- |
+| `sap-adt-cli`          | 通过 ADT API 读写 ABAP 源代码、执行 SQL、管理传输请求 |
+| `abap-code-review`     | 单个 ABAP 程序上线前安全与质量审查（9 维度）          |
+| `sap-transport-gate`   | 传输请求上线门控评估——基于证据的 GO/NO-GO 决策        |
+| `sap-integration-wiki` | SAP 集成模式、API 参考、按场景故障排除                |
 
 ---
 
