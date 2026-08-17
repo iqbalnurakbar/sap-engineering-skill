@@ -149,18 +149,6 @@ python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
 
 ---
 
-## Development Paradigm
-
-This project was built using an AI-native, spec-driven development loop:
-
-1. **Specification** — Requirements were worked out in conversation with an AI assistant, producing structured Markdown prompt files encoding the full spec (scope, acceptance criteria, anti-patterns).
-2. **Execution** — Prompt files were consumed end-to-end by an AI coding agent — which planned, implemented, tested, and verified changes autonomously.
-3. **Review** — The human role was limited to deciding *what* to build, reviewing outputs, and iterating on the spec.
-
-> The author is a SAP consultant with over ten years of project experience and no software development background. This project grew from a practical daily need and became a personal experiment in how an AI-native workflow can reshape what domain experts are able to build — shared here in the hope it's useful to others on a similar path.
-
----
-
 ## License
 
 [MIT](LICENSE)
