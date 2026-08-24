@@ -9,6 +9,9 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
+> [!IMPORTANT]
+> **This repository has been archived and is no longer updated.** `sap-integration-wiki` is now maintained exclusively in the [sap-engineering-skill](https://github.com/shrek-abaper/sap-engineering-skill) monorepo at [`skills/sap-integration-wiki`](https://github.com/shrek-abaper/sap-engineering-skill/tree/main/skills/sap-integration-wiki). Please go there for the latest version, issues, and improvements.
+
 ---
 
 ## What Is This?

@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `sap-transport-gate` | Transport Request release gate assessment (10 dimensions) | `skills/sap-transport-gate/` |
 | `sap-integration-wiki` | SAP integration knowledge base (9 domains, 8 technologies) | `skills/sap-integration-wiki/` |
 
-The three subtree skills (`abap-code-review`, `sap-transport-gate`, `sap-integration-wiki`) are maintained as independent public repositories and are tracked via git subtree remotes.
+The three skills `abap-code-review`, `sap-transport-gate`, and `sap-integration-wiki` were previously maintained as standalone public repositories tracked via git subtree. Those repositories were **archived in August 2026** - all updates now happen exclusively in this repo.
 
 ---
 
@@ -31,18 +31,18 @@ sap-engineering-skill/
 │   │   │   ├── sap_adt_cli.py    ← Main CLI entry point
 │   │   │   └── lib/              ← config.py, handlers.py, client.py
 │   │   └── SKILL.md              ← Skill spec for agent frameworks
-│   ├── abap-code-review/         ← [git subtree] independent repo
+│   ├── abap-code-review/         ← ABAP code review skill
 │   │   ├── references/           ← REF_ABAP_SECURITY.md, REF_CLEAN_ABAP.md
 │   │   │                        └── REPORT_TEMPLATE.md
 │   │   └── SKILL.md
-│   ├── sap-transport-gate/       ← [git subtree] independent repo
+│   ├── sap-transport-gate/       ← Transport gate review skill
 │   │   ├── scripts/
 │   │   │   ├── tr_collector.py   ← Online TR collection CLI
 │   │   │   └── lib/              ← config.py, handlers.py, client.py
 │   │   ├── references/           ← Decision policy, review dimensions, etc.
 │   │   ├── evals/                ← Golden set, evals.json
 │   │   └── SKILL.md
-│   └── sap-integration-wiki/     ← [git subtree] independent repo
+│   └── sap-integration-wiki/     ← SAP integration knowledge base
 │       ├── references/           ├── scenarios/, tech/, troubleshoot/
 │       ├── scripts/              ← gen-odata-postman.js, gen-jco-config.py, etc.
 │       ├── assets/               ├── payloads/, configs/
@@ -55,29 +55,15 @@ sap-engineering-skill/
 
 ---
 
-## Git Subtree Management
+## Archived Standalone Repositories (Historical)
 
-Three skills are tracked as independent subtrees from public repositories:
+The three skills below were previously maintained as standalone public repositories tracked via git subtree. They were **archived in August 2026** and are now read-only; all changes are maintained directly in this repo. Do not pull from or push to these remotes.
 
-| Remote | Repository | Subtree Path |
+| Remote (historical) | Repository (archived) | Subtree Path |
 |--------|-----------|--------------|
 | `pub-abap-code-review` | https://github.com/shrek-abaper/abap-code-review | `skills/abap-code-review/` |
 | `pub-sap-transport-gate` | https://github.com/shrek-abaper/sap-transport-gate | `skills/sap-transport-gate/` |
 | `pub-sap-integration-wiki` | https://github.com/shrek-abaper/sap-integration-wiki | `skills/sap-integration-wiki/` |
-
-**Pull changes from subtree:**
-```bash
-git subtree pull --prefix=skills/abap-code-review pub-abap-code-review main --squash
-git subtree pull --prefix=skills/sap-transport-gate pub-sap-transport-gate main --squash
-git subtree pull --prefix=skills/sap-integration-wiki pub-sap-integration-wiki main --squash
-```
-
-**Push changes to subtree:**
-```bash
-git subtree push --prefix=skills/abap-code-review pub-abap-code-review main
-```
-
-When working within a subtree skill, changes should eventually be pushed to the corresponding public repository.
 
 ---
 
