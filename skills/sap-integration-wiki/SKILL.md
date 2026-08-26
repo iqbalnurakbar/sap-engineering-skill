@@ -1,31 +1,19 @@
 ---
 name: sap-integration-wiki
 description: >
-  Comprehensive integration guide for connecting external systems (Java, Python, .NET,
-  Node.js, low-code platforms, etc.) to SAP (ECC, S/4HANA On-Premise, S/4HANA Cloud).
-  Covers OData V2/V4, RFC/JCo, SOAP over HTTP RFC (no-JCo RFC calls via standard HTTPS),
-  IDoc/PI-PO, BAPI, RAP REST APIs, BTP Integration Suite, SAP Event Mesh, FI-AA asset
-  accounting, AR/AP open items, and Financial Shared Service Center (FSSC) integration
-  patterns (Kingdee/金蝶 ↔ SAP, SAP Central Finance CFIN) with scenario-driven
-  recommendations, working code examples, payload samples, and error troubleshooting.
-  Activate this skill whenever someone asks how to integrate with SAP, call a SAP API,
-  create or read SAP data (purchase orders, inventory, sales orders, financial documents,
-  AR/AP open items, asset accounting, material master, business partner, production orders)
-  from outside SAP, configure JCo or RFC, call SAP BAPI without JCo, use SOAP to call SAP
-  RFC, call SAP from Python/Node.js/Go without installing SAP libraries, handle SAP IDoc
-  messages, use BTP Cloud Integration or iFlow, set up Communication Arrangements for
-  S/4HANA Cloud, troubleshoot SAP HTTP 400/401/403 errors, implement retry or idempotency
-  for SAP calls, build a financial shared service center on SAP, connect Kingdee/金蝶/用友
-  to SAP, replicate financial documents into SAP Central Finance (CFIN), or says things
-  like "connect to SAP", "get data from SAP", "SAP keeps returning 401", "how do I call
-  BAPI from Java", "how do I call SAP RFC from Python", "call SAP without JCo",
-  "SAP SOAP endpoint", "/sap/bc/soap/rfc", "SAP OData not working",
-  "CSRF token validation failed", "IDoc status 51", "BAPI_PO_CREATE1",
-  "API_PURCHASEORDER_PROCESS_SRV", "JCo connection", "RFC destination", "BTP iFlow",
-  "Cloud Connector", "SAP Event Mesh", "Communication Arrangement",
-  "BAPI_FIXEDASSET_GETLIST", "BAPI_ASSET_ACQUISITION_POST", "CFIN OData V4",
-  "API_CFinRpldSupplierInvoice", "财务共享中心" — even when the user does not say "SAP"
-  and just describes the problem symptomatically.
+  Integration guide for connecting external systems (Java, Python, .NET, Node.js,
+  low-code) to SAP (ECC, S/4HANA On-Prem/Cloud). Covers OData V2/V4, RFC/JCo,
+  SOAP-over-HTTP-RFC (no JCo needed), IDoc/PI-PO, BAPI, RAP APIs, BTP Integration
+  Suite, Event Mesh, FI-AA asset accounting, AR/AP open items, and FSSC patterns
+  (Kingdee/金蝶 to/from SAP, Central Finance CFIN), with scenario recommendations, code
+  samples, and troubleshooting. Activate for: integrating with SAP, calling SAP
+  APIs, creating/reading SAP data (POs, inventory, sales orders, FI docs, AR/AP,
+  assets, material/BP master, production orders), JCo/RFC setup, calling BAPI
+  without JCo, SOAP RFC calls, SAP IDoc handling, BTP iFlow/Communication
+  Arrangements, SAP HTTP 4xx/401/403 errors, retry/idempotency, FSSC builds,
+  Kingdee/用友-SAP links, CFIN replication, or errors like CSRF token failed, IDoc
+  status 51, BAPI_PO_CREATE1, API_PURCHASEORDER_PROCESS_SRV, RFC destination,
+  财务共享中心 - even if the user never says "SAP" explicitly.
 ---
 
 # SAP Integration Wiki
