@@ -373,7 +373,8 @@ def _parse_transports(xml_text: str, status_filter: str = "") -> list:
                     attr_map[aname] = avalue
 
         trkorr = attr_map.get("TRKORR") or flat.get("number") or flat.get("TRKORR", "")
-        desc = attr_map.get("AS4TEXT") or flat.get("description") or flat.get("AS4TEXT", "")
+        desc = (attr_map.get("AS4TEXT") or flat.get("desc")
+                or flat.get("description") or flat.get("AS4TEXT", ""))
         status = attr_map.get("TRSTATUS") or flat.get("status") or flat.get("TRSTATUS", "")
         owner = attr_map.get("AS4USER") or flat.get("owner") or flat.get("AS4USER", "")
 
@@ -496,11 +497,8 @@ def run_sql(sql: str, max_rows: int = 100) -> AdtResult:
 def list_transports(user: str, status: str = "D") -> AdtResult:
     try:
         resp = make_adt_request(
-            f"{_base()}/sap/bc/adt/cts/transports",
-            params={"user": user, "target": "", "category": "Workbench"},
-            extra_headers={
-                "Accept": "application/vnd.sap.cts.transport.worklist+xml; charset=utf-8"
-            },
+            f"{_base()}/sap/bc/adt/cts/transportrequests",
+            params={"user": user},
         )
         items = _parse_transports(resp.text, status_filter=status)
         return AdtResult(text=json.dumps(items, indent=2))
