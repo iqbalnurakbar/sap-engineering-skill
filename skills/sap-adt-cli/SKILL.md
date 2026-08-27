@@ -151,6 +151,28 @@ SAP_PASSWORD="mysecret" python3 "$SAP_CLI" configure \
 > (e.g. a trusted CI pipeline). Never pass `--yes` on behalf of the user
 > based on a previous confirmation in the same conversation.
 
+> **Ask, do not infer, before an object-creating write (CRITICAL):**
+> `create-transport` and `create-program` take values that belong to the user,
+> not to the agent. If the user has not supplied one, **ask** — batched into a
+> single question, not one per turn — before running anything:
+>
+> | Command | Must come from the user |
+> |---|---|
+> | `create-program` | package (DEVCLASS), description/title, transport, program type if not a plain report |
+> | `create-transport` | description, category (Workbench vs Customizing), **target system** |
+>
+> Do not copy a package from a similarly named object, and do not invent a
+> transport description from a naming convention. A wrong package fixes the
+> transport layer and can strand the object; a wrong description is what a
+> reviewer reads months later. Reading the system to *offer* informed choices
+> (candidate packages from `TADIR`, targets from `/valuehelp/target`) is
+> encouraged — the user still picks.
+>
+> The transport **target system is never defaulted, not even when
+> `/valuehelp/target` returns exactly one candidate** — ask. The value help
+> exists to present the choice, not to make it. `create-transport` aborts
+> without `--target` and prints the candidates for you to offer.
+
 > **Security note:** inform the user that credentials stored in SKILL-local `.env`
 > or `~/.sap-adt-cli/config.json` are plain text. The JSON config file is
 > protected with `0600` permissions but is not encrypted.
@@ -196,6 +218,7 @@ unless the user explicitly authorizes write or transport operations.
 | `syntax-check` | `syntax-check <TYPE> <NAME> [--group <FG>]` | ABAP syntax check — no system change |
 | `get-cds-view` | `get-cds-view <NAME>` | CDS View DDL source code |
 | `get-type-group` | `get-type-group <NAME>` | ABAP type group (TYPE POOL) source |
+| `create-program` | `create-program <NAME> --description "<D>" --package <PKG> [--transport <TR>]` | Create an empty program shell *(allow_write + confirm each time)* |
 | `write-source` | `write-source <TYPE> <NAME> --file <PATH>` | Write source code *(allow_write + confirm each time)* |
 | `activate` | `activate <TYPE> <NAME>` | Activate ABAP object *(allow_write + confirm each time)* |
 | `where-used` | `where-used <TYPE> <NAME> [--max-results N]` | Where-used list → JSON array |

@@ -1,4 +1,5 @@
 import json
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Optional
@@ -207,10 +208,11 @@ def _extract_lock_handle(resp: requests.Response) -> str:
             for elem in root.iter():
                 for k, v in elem.attrib.items():
                     kl = k.split("}")[-1] if "}" in k else k
-                    if kl in ("handle", "lockHandle", "lock"):
+                    if kl.replace("_", "").lower() in ("handle", "lockhandle"):
                         return v
                 tl = _tag_local(elem)
-                if tl in ("handle", "lockHandle") and elem.text:
+                # ADT returns <LOCK_HANDLE> inside asx:abap/asx:values/DATA
+                if tl.replace("_", "").lower() in ("handle", "lockhandle") and elem.text:
                     return elem.text.strip()
         except ET.ParseError:
             return resp.text.strip()
@@ -498,7 +500,10 @@ def list_transports(user: str, status: str = "D") -> AdtResult:
     try:
         resp = make_adt_request(
             f"{_base()}/sap/bc/adt/cts/transportrequests",
-            params={"user": user},
+            # requestStatus must be sent server-side: without it ADT returns
+            # only the released worklist, so a client-side "D" filter can
+            # never match. D = modifiable, R = released.
+            params={"user": user, "requestStatus": status},
         )
         items = _parse_transports(resp.text, status_filter=status)
         return AdtResult(text=json.dumps(items, indent=2))
@@ -506,12 +511,150 @@ def list_transports(user: str, status: str = "D") -> AdtResult:
         return _err(e)
 
 
+def set_program_logical_database(
+    program_name: str,
+    logical_database: str = "",
+    transport: str = "",
+) -> AdtResult:
+    """Set or blank the logical database in a program's attributes.
+
+    The attribute lives in the program's metadata document, not in its source:
+
+        <program:logicalDatabase>
+          <program:ref adtcore:name="D$S"/>
+        </program:logicalDatabase>
+
+    SAP can derive one automatically from TABLES declarations (a report
+    declaring TABLES for SD tables picks up the dummy LDB "D$S"), which shows
+    up as TRDIR-LDBNAME. Passing an empty ``logical_database`` blanks it.
+
+    Flow: GET metadata -> rewrite the block -> lock -> PUT -> unlock.
+    """
+    name = program_name.upper()
+    uri = f"/sap/bc/adt/programs/programs/{_enc(name)}"
+    media = "application/vnd.sap.adt.programs.programs.v2+xml"
+
+    try:
+        doc = make_adt_request(
+            f"{_base()}{uri}", extra_headers={"Accept": media}
+        ).text
+    except Exception as e:
+        return _err(e)
+
+    block = (
+        "<program:logicalDatabase>"
+        f'<program:ref adtcore:name="{_xattr(logical_database)}"/>'
+        "</program:logicalDatabase>"
+    )
+    if "<program:logicalDatabase" in doc:
+        new_doc = re.sub(
+            r"<program:logicalDatabase>.*?</program:logicalDatabase>",
+            block, doc, flags=re.S,
+        )
+    elif not logical_database:
+        return AdtResult(
+            text=f"{name}: no logical database is set - nothing to do."
+        )
+    else:
+        new_doc = doc.replace(
+            "</program:abapProgram>", block + "</program:abapProgram>"
+        )
+
+    lock = lock_object(uri)
+    if lock.is_error:
+        return lock
+    handle = lock.text
+    try:
+        params = {"lockHandle": handle}
+        if transport:
+            params["corrNr"] = transport
+        make_adt_request(
+            f"{_base()}{uri}",
+            method="PUT",
+            data=new_doc.encode("utf-8"),
+            params=params,
+            extra_headers={"Content-Type": media},
+        )
+        shown = logical_database or "(blank)"
+        return AdtResult(text=f"Logical database of {name} set to {shown}.")
+    except Exception as e:
+        return _err(e)
+    finally:
+        unlock_object(uri, handle)
+
+
+def create_program(
+    program_name: str,
+    description: str,
+    package: str,
+    transport: str = "",
+    program_type: str = "executableProgram",
+) -> AdtResult:
+    """Create an ABAP program (report) shell.
+
+    Contract from /sap/bc/adt/discovery: the collection
+    /sap/bc/adt/programs/programs declares
+        <app:accept>application/vnd.sap.adt.programs.programs.v2+xml</app:accept>
+    so a POST of that media type creates a member of the collection.
+
+    The transport is passed as the ``corrNr`` query parameter. A local
+    ($TMP) package needs none.
+
+    The created program has no source yet -- follow up with put_source
+    (the ``write-source`` command) and then activate it.
+    """
+    name = program_name.upper()
+    try:
+        body = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<program:abapProgram'
+            ' xmlns:program="http://www.sap.com/adt/programs/programs"'
+            ' xmlns:adtcore="http://www.sap.com/adt/core"'
+            f' adtcore:name="{_xattr(name)}"'
+            ' adtcore:type="PROG/P"'
+            f' adtcore:description="{_xattr(description)}"'
+            f' program:programType="{_xattr(program_type)}">'
+            f'<adtcore:packageRef adtcore:name="{_xattr(package.upper())}"/>'
+            "</program:abapProgram>"
+        ).encode("utf-8")
+        params = {"corrNr": transport} if transport else None
+        resp = make_adt_request(
+            f"{_base()}/sap/bc/adt/programs/programs",
+            method="POST",
+            data=body,
+            params=params,
+            extra_headers={
+                "Content-Type": (
+                    "application/vnd.sap.adt.programs.programs.v2+xml; charset=UTF-8"
+                ),
+            },
+        )
+        return AdtResult(
+            text=(f"Created PROGRAM {name} in package {package.upper()} "
+                  f"(HTTP {resp.status_code}). Source is still empty - use "
+                  f"write-source to load it, then activate.")
+        )
+    except Exception as e:
+        return _err(e)
+
+
 def lock_object(object_uri: str) -> AdtResult:
     try:
         resp = make_adt_request(
-            f"{_base()}{object_uri}?method=lock",
+            f"{_base()}{object_uri}",
             method="POST",
-            extra_headers={"X-sap-adt-sessiontype": "stateful"},
+            # ADT lock contract: _action=LOCK&accessMode=MODIFY. A bodyless
+            # POST still needs a Content-Type or SAP answers HTTP 400
+            # contentTypeMissing. The handle comes back in <LOCK_HANDLE>.
+            params={"_action": "LOCK", "accessMode": "MODIFY"},
+            extra_headers={
+                "X-sap-adt-sessiontype": "stateful",
+                "Accept": (
+                    "application/vnd.sap.as+xml;charset=UTF-8;"
+                    "dataname=com.sap.adt.lock.Result"
+                ),
+                "Content-Type": "application/vnd.sap.as+xml; charset=UTF-8",
+            },
         )
         handle = _extract_lock_handle(resp)
         if not handle:
@@ -530,11 +673,16 @@ def put_source(
     try:
         extra: dict = {
             "Content-Type": "text/plain; charset=utf-8",
-            "X-sap-adt-lock-handle": lock_handle,
         }
-        params: Optional[dict] = None
+        # ADT takes BOTH the lock handle and the transport as query
+        # parameters on the source PUT:
+        #   lockHandle - passing it only as the X-sap-adt-lock-handle header
+        #                yields HTTP 400 ExceptionParameterNotFound
+        #   corrNr     - the transport request; the older "sap-cts-request"
+        #                name fails the same way
+        params: dict = {"lockHandle": lock_handle}
         if transport:
-            params = {"sap-cts-request": transport}
+            params["corrNr"] = transport
         make_adt_request(
             f"{_base()}{object_uri}/source/main",
             method="PUT",
@@ -550,9 +698,13 @@ def put_source(
 def unlock_object(object_uri: str, lock_handle: str) -> AdtResult:
     try:
         make_adt_request(
-            f"{_base()}{object_uri}?method=unlock",
+            f"{_base()}{object_uri}",
             method="POST",
-            extra_headers={"X-sap-adt-lock-handle": lock_handle},
+            params={"_action": "UNLOCK", "lockHandle": lock_handle},
+            extra_headers={
+                "X-sap-adt-sessiontype": "stateful",
+                "Content-Type": "application/vnd.sap.as+xml; charset=UTF-8",
+            },
         )
         return AdtResult(text="OK")
     except Exception:
@@ -576,6 +728,9 @@ def activate_object(
             f"{_base()}/sap/bc/adt/activation",
             method="POST",
             data=body,
+            # The activation resource requires method=activate; without it
+            # SAP answers HTTP 400 ExceptionParameterNotFound for "method".
+            params={"method": "activate", "preauditRequested": "true"},
             extra_headers={
                 "Content-Type": (
                     "application/vnd.sap.adt.activation.request+xml; charset=utf-8"
@@ -593,37 +748,80 @@ def activate_object(
         return _err(e)
 
 
+_TRKORR_RE = re.compile(r"[A-Z][A-Z0-9]{2}K[0-9]{6}")
+
+
+def _extract_trkorr(resp) -> str:
+    """Pull the transport number from a Location header, else from the body."""
+    location = resp.headers.get("Location", "")
+    if location:
+        candidate = location.rstrip("/").rsplit("/", 1)[-1]
+        if _TRKORR_RE.fullmatch(candidate):
+            return candidate
+    match = _TRKORR_RE.search(resp.text or "")
+    return match.group(0) if match else ""
+
+
+def list_transport_targets() -> list:
+    """Valid transport targets for this system, from the ADT value help."""
+    resp = make_adt_request(
+        f"{_base()}/sap/bc/adt/cts/transportrequests/valuehelp/target",
+        params={"maxItemCount": "50"},
+    )
+    root = ET.fromstring(resp.text)
+    return [e.text or "" for e in root.iter() if _tag_local(e) == "name"]
+
+
 def create_transport(
     description: str,
     category: str = "Workbench",
     username: str = "",
+    target: str = "",
+    package: str = "",
 ) -> AdtResult:
+    """Create a transport request via the ADT transport organizer.
+
+    Contract taken from /sap/bc/adt/discovery, where the collection
+    /sap/bc/adt/cts/transportrequests declares
+        <app:accept>application/vnd.sap.adt.transportorganizer.v1+xml</app:accept>
+    and the POST body must be rooted at {http://www.sap.com/cts/adt/tm}root.
+
+    ``target`` is the transport target system (see list_transport_targets);
+    SAP needs it to place the request on a transport route.
+
+    ``package`` is not part of this contract and is ignored. It stays in the
+    signature so older callers keep working.
+    """
+    request_type = "W" if category.upper().startswith("CUST") else "K"
     try:
         body = (
-            '<?xml version="1.0" encoding="utf-8"?>'
-            '<cts:transportRequest xmlns:cts="http://www.sap.com/cts">'
-            "<cts:attributes>"
-            f'<cts:attribute name="category"    value="{_xattr(category)}"/>'
-            f'<cts:attribute name="owner"       value="{_xattr(username)}"/>'
-            f'<cts:attribute name="description" value="{_xattr(description)}"/>'
-            '<cts:attribute name="target"      value=""/>'
-            "</cts:attributes>"
-            "</cts:transportRequest>"
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm"'
+            ' tm:useraction="newrequest">'
+            f'<tm:request tm:desc="{_xattr(description)}"'
+            f' tm:type="{request_type}"'
+            f' tm:target="{_xattr(target)}"'
+            ' tm:cts_project="">'
+            f'<tm:task tm:owner="{_xattr(username)}"/>'
+            "</tm:request>"
+            "</tm:root>"
         ).encode("utf-8")
         resp = make_adt_request(
-            f"{_base()}/sap/bc/adt/cts/transports",
+            f"{_base()}/sap/bc/adt/cts/transportrequests",
             method="POST",
             data=body,
             extra_headers={
-                "Content-Type": (
-                    "application/vnd.sap.cts.transport.request+xml; charset=utf-8"
-                )
+                "Content-Type": "application/vnd.sap.adt.transportorganizer.v1+xml",
             },
         )
-        location = resp.headers.get("Location", "")
-        trkorr = location.rstrip("/").rsplit("/", 1)[-1] if location else ""
+        trkorr = _extract_trkorr(resp)
         if not trkorr:
-            trkorr = resp.text.strip() or "(unknown)"
+            body_snippet = (resp.text or "")[:300]
+            return AdtResult(
+                text=("Transport POST returned no parseable request number. "
+                      f"Status {resp.status_code}. Body: {body_snippet}"),
+                is_error=True,
+            )
         return AdtResult(text=f"Created transport: {trkorr}")
     except Exception as e:
         return _err(e)

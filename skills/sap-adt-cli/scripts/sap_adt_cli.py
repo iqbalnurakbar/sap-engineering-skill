@@ -365,6 +365,85 @@ def get_type_group(name):
     _output(handlers.get_type_group(name))
 
 
+@cli.command("create-program")
+@click.argument("program_name")
+@click.option("--description", required=True, help="Program title / short description")
+@click.option("--package",     required=True, help="Package (DEVCLASS), e.g. ZMM; use $TMP for a local object")
+@click.option("--transport",   default="", help="Transport request; not needed for a $TMP local object")
+@click.option("--type", "program_type", default="executableProgram", show_default=True,
+              help="ADT program type: executableProgram, includeProgram, modulePool, subroutinePool")
+@click.option("--yes",         is_flag=True, default=False, help="Skip confirmation prompt. Use only in trusted automation.")
+def create_program_cmd(program_name, description, package, transport, program_type, yes):
+    """Create an ABAP program shell - requires allow_write + confirmation each time.
+
+    Creates the object only; its source stays empty. Follow with:
+
+        write-source program <NAME> --file <PATH> --transport <TR> --activate
+
+    Requires 'allow_write' enabled in config. Run `configure` to enable.
+    """
+    config = load_config()
+    if config is None:
+        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
+        sys.exit(1)
+    _require_write(config)
+
+    if package.upper() != "$TMP" and not transport:
+        click.echo(
+            "ERROR: a transportable package requires --transport "
+            "(or pass --package $TMP to create a local object).",
+            err=True,
+        )
+        sys.exit(1)
+
+    preview = [
+        "Action      : Create ABAP program (shell only, no source)",
+        f"Program     : {program_name.upper()}",
+        f"Description : {description}",
+        f"Package     : {package.upper()}",
+        f"Transport   : {transport or '(none - local object)'}",
+        f"Type        : {program_type}",
+    ]
+    _confirm_change(preview, yes=yes)
+    _output(handlers.create_program(
+        program_name,
+        description,
+        package,
+        transport=transport,
+        program_type=program_type,
+    ))
+
+
+@cli.command("set-program-ldb")
+@click.argument("program_name")
+@click.option("--ldb",       default="", help='Logical database name; omit or pass "" to blank it')
+@click.option("--transport", default="", help="Transport request recording the attribute change")
+@click.option("--yes",       is_flag=True, default=False, help="Skip confirmation prompt. Use only in trusted automation.")
+def set_program_ldb_cmd(program_name, ldb, transport, yes):
+    """Set or blank a program's logical database attribute.
+
+    SAP may derive a logical database from TABLES declarations (showing up as
+    TRDIR-LDBNAME, e.g. "D$S"). This clears or overrides it.
+
+    Requires 'allow_write' enabled in config. Run `configure` to enable.
+    """
+    config = load_config()
+    if config is None:
+        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
+        sys.exit(1)
+    _require_write(config)
+
+    preview = [
+        "Action          : Set program logical database attribute",
+        f"Program         : {program_name.upper()}",
+        f"Logical database: {ldb or '(blank)'}",
+        f"Transport       : {transport or '(none)'}",
+    ]
+    _confirm_change(preview, yes=yes)
+    _output(handlers.set_program_logical_database(
+        program_name, logical_database=ldb, transport=transport))
+
+
 @cli.command("write-source")
 @click.argument("object_type")
 @click.argument("object_name")
@@ -536,11 +615,12 @@ def list_transports_cmd(user, status):
 @cli.command("create-transport")
 @click.option("--description", required=True, help="Transport request description")
 @click.option("--category",    default="Workbench", show_default=True, help="Transport category: Workbench or Customizing")
+@click.option("--target",      default="", help="Transport target system; auto-resolved when the system offers exactly one")
 @click.option("--yes",         is_flag=True, default=False, help="Skip confirmation prompt. Use only in trusted automation.")
-def create_transport_cmd(description, category, yes):
+def create_transport_cmd(description, category, target, yes):
     """Create a transport request — requires allow_transport + confirmation each time.
 
-    Returns the new transport request number (e.g. DEVK900003).
+    Returns the new transport request number (e.g. NSDK900003).
 
     Requires 'allow_transport' enabled in config. Run `configure` to enable.
     """
@@ -549,14 +629,40 @@ def create_transport_cmd(description, category, yes):
         click.echo("Not configured. Run: sap-adt-cli configure", err=True)
         sys.exit(1)
     _require_transport_write(config)
+
+    if not target:
+        # The target system is never defaulted or auto-resolved, not even when
+        # the value help offers a single candidate. Surface the candidates so
+        # the caller can put the choice to the user, then abort.
+        try:
+            candidates = handlers.list_transport_targets()
+        except Exception:
+            candidates = []
+        hint = (f" Available targets: {', '.join(candidates)}."
+                if candidates else
+                " Could not read /valuehelp/target to list candidates.")
+        click.echo(
+            "ERROR: --target is required. The transport target system must be "
+            "chosen explicitly by the user, never defaulted." + hint,
+            err=True,
+        )
+        sys.exit(1)
+    resolved_target = target
+
     preview = [
         "Action      : Create transport request",
         f"Category    : {category}",
         f"Description : {description}",
         f"Owner       : {config.username}",
+        f"Target      : {resolved_target or '(none)'}",
     ]
     _confirm_change(preview, yes=yes)
-    _output(handlers.create_transport(description, category=category, username=config.username))
+    _output(handlers.create_transport(
+        description,
+        category=category,
+        username=config.username,
+        target=resolved_target,
+    ))
 
 
 @cli.command("release-transport")
