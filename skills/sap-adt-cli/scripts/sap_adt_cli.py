@@ -126,10 +126,11 @@ def cli():
 @click.option("--password",               default=None, help="SAP password (see security warning below)")
 @click.option("--client",                 default=None, help="SAP client number (e.g. 100)")
 @click.option("--language",               default=None, help="Language code (default: EN)")
-@click.option("--no-verify-ssl",          is_flag=True, default=False, help="Disable SSL certificate verification")
-@click.option("--allow-write/--no-allow-write",         default=False, help="Enable source code write (write-source, activate)")
-@click.option("--allow-transport/--no-allow-transport", default=False, help="Enable transport write operations (create-transport, release-transport)")
-def configure(url, username, password, client, language, no_verify_ssl, allow_write, allow_transport):
+@click.option("--verify-ssl/--no-verify-ssl", "verify_ssl", default=None, help="Enable/disable SSL certificate verification (unchanged if omitted)")
+@click.option("--allow-write/--no-allow-write",         default=None, help="Enable source code write (write-source, activate). Unchanged if omitted.")
+@click.option("--allow-transport/--no-allow-transport", default=None, help="Enable transport write operations (create-transport, release-transport). Unchanged if omitted.")
+@click.option("--platform", default=None, help="Backend flavour: s4 (S/4HANA) or ecc (ECC / NetWeaver). Required for transport commands.")
+def configure(url, username, password, client, language, verify_ssl, allow_write, allow_transport, platform):
     """Save SAP connection credentials.
 
     When called with flags the credentials are saved non-interactively —
@@ -141,7 +142,9 @@ def configure(url, username, password, client, language, no_verify_ssl, allow_wr
     shell history and process listings. Prefer the interactive wizard or
     the SAP_PASSWORD environment variable.
     """
-    if any([url, username, password, client]):
+    specified = [url, username, password, client, platform]
+    tri_state = [verify_ssl, allow_write, allow_transport]
+    if any(specified) or any(v is not None for v in tri_state):
         if password:
             click.echo(
                 "Warning: passing --password on the command line may expose it in shell history "
@@ -155,9 +158,10 @@ def configure(url, username, password, client, language, no_verify_ssl, allow_wr
             password=password,
             client=client,
             language=language,
-            verify_ssl=not no_verify_ssl,
+            verify_ssl=verify_ssl,
             allow_write=allow_write,
             allow_transport=allow_transport,
+            platform=platform,
         )
     else:
         run_configure_wizard()
@@ -177,7 +181,24 @@ def status():
     click.echo(f"SSL:             {'verify' if config.verify_ssl else 'skip (self-signed allowed)'}")
     click.echo(f"Write mode:      {'ENABLED' if config.allow_write else 'DISABLED'}")
     click.echo(f"Transport write: {'ENABLED' if config.allow_transport else 'DISABLED'}")
+    click.echo(f"Platform:        {config.platform.upper() if config.platform else 'NOT SET (required for transport commands)'}")
     click.echo(f"Config source:   {source}")
+
+
+def _require_platform(config):
+    """Transport commands must know the backend flavour; it is never guessed."""
+    if not getattr(config, "platform", ""):
+        lines = (
+            "ERROR: backend platform not configured.",
+            "ADT registers the Change & Transport System resources at different",
+            "URLs on S/4HANA and on ECC, so transport commands cannot proceed",
+            "without knowing which this is.",
+            "Ask the user whether this system is S/4HANA or ECC, then run:",
+            "  sap-adt-cli configure --platform s4     (S/4HANA)",
+            "  sap-adt-cli configure --platform ecc    (ECC / NetWeaver)",
+        )
+        click.echo(chr(10).join(lines), err=True)
+        sys.exit(1)
 
 
 @cli.command("get-program")
@@ -608,52 +629,84 @@ def list_transports_cmd(user, status):
     if config is None:
         click.echo("Not configured. Run: sap-adt-cli configure", err=True)
         sys.exit(1)
+    _require_platform(config)
     effective_user = user or config.username
     _output(handlers.list_transports(effective_user, status=status))
 
 
 @cli.command("create-transport")
 @click.option("--description", required=True, help="Transport request description")
-@click.option("--category",    default="Workbench", show_default=True, help="Transport category: Workbench or Customizing")
-@click.option("--target",      default="", help="Transport target system; auto-resolved when the system offers exactly one")
+@click.option("--category",    default="Workbench", show_default=True, help="Transport category: Workbench or Customizing (S/4HANA only; ECC is always Workbench)")
+@click.option("--target",      default="", help="Transport target system (S/4HANA only). On ECC the backend derives it from the package.")
+@click.option("--package",     default="", help="Package (DEVCLASS) the request is for. Required on ECC, ignored on S/4HANA.")
 @click.option("--yes",         is_flag=True, default=False, help="Skip confirmation prompt. Use only in trusted automation.")
-def create_transport_cmd(description, category, target, yes):
+def create_transport_cmd(description, category, target, package, yes):
     """Create a transport request — requires allow_transport + confirmation each time.
 
     Returns the new transport request number (e.g. NSDK900003).
 
     Requires 'allow_transport' enabled in config. Run `configure` to enable.
+
+    The required options differ by platform, because ADT exposes different
+    CTS resources on each:
+
+      S/4HANA  --target is required (the target system is never defaulted).
+      ECC      --package is required; the backend derives the target from the
+               package's transport layer, and the category is always Workbench.
     """
     config = load_config()
     if config is None:
         click.echo("Not configured. Run: sap-adt-cli configure", err=True)
         sys.exit(1)
     _require_transport_write(config)
+    _require_platform(config)
 
-    if not target:
-        # The target system is never defaulted or auto-resolved, not even when
-        # the value help offers a single candidate. Surface the candidates so
-        # the caller can put the choice to the user, then abort.
-        try:
-            candidates = handlers.list_transport_targets()
-        except Exception:
-            candidates = []
-        hint = (f" Available targets: {', '.join(candidates)}."
-                if candidates else
-                " Could not read /valuehelp/target to list candidates.")
-        click.echo(
-            "ERROR: --target is required. The transport target system must be "
-            "chosen explicitly by the user, never defaulted." + hint,
-            err=True,
-        )
-        sys.exit(1)
-    resolved_target = target
+    if config.platform == "ecc":
+        if not package:
+            click.echo(
+                "ERROR: --package is required on ECC. The backend derives the "
+                "transport target from the package's transport layer, so it "
+                "cannot create the request without one. Ask the user which "
+                "package this belongs to — never infer it.",
+                err=True,
+            )
+            sys.exit(1)
+        if target:
+            click.echo(
+                f"NOTE: --target {target} ignored on ECC; the backend derives the "
+                f"target from package {package}.",
+                err=True,
+            )
+        resolved_target = f"(derived from package {package})"
+        resolved_category = "Workbench (fixed on ECC)"
+    else:
+        if not target:
+            # The target system is never defaulted or auto-resolved, not even when
+            # the value help offers a single candidate. Surface the candidates so
+            # the caller can put the choice to the user, then abort.
+            try:
+                candidates = handlers.list_transport_targets()
+            except Exception:
+                candidates = []
+            hint = (f" Available targets: {', '.join(candidates)}."
+                    if candidates else
+                    " Could not read /valuehelp/target to list candidates.")
+            click.echo(
+                "ERROR: --target is required on S/4HANA. The transport target system "
+                "must be chosen explicitly by the user, never defaulted." + hint,
+                err=True,
+            )
+            sys.exit(1)
+        resolved_target = target
+        resolved_category = category
 
     preview = [
         "Action      : Create transport request",
-        f"Category    : {category}",
+        f"Platform    : {config.platform.upper()}",
+        f"Category    : {resolved_category}",
         f"Description : {description}",
         f"Owner       : {config.username}",
+        f"Package     : {package or '(n/a)'}",
         f"Target      : {resolved_target or '(none)'}",
     ]
     _confirm_change(preview, yes=yes)
@@ -661,7 +714,8 @@ def create_transport_cmd(description, category, target, yes):
         description,
         category=category,
         username=config.username,
-        target=resolved_target,
+        target=target,
+        package=package,
     ))
 
 
@@ -683,6 +737,15 @@ def release_transport_cmd(trkorr, yes):
         click.echo("Not configured. Run: sap-adt-cli configure", err=True)
         sys.exit(1)
     _require_transport_write(config)
+    _require_platform(config)
+    if config.platform == "ecc":
+        click.echo(
+            "ERROR: release-transport is not available over ADT on ECC - the backend "
+            "does not expose a release endpoint on the HTTP branch. Release the "
+            "request in SE01/SE09 instead.",
+            err=True,
+        )
+        sys.exit(1)
     preview = [
         "Action  : Release transport request",
         f"TRKORR  : {trkorr}",

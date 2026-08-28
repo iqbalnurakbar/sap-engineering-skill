@@ -168,45 +168,133 @@ GET /sap/bc/adt/repository/informationsystem/objectproperties/values
 
 ## Transport Requests
 
-### List transports
+**The CTS endpoints are NOT the same on every backend.** ADT registers them in
+`CL_CTS_ADT_RES_APP->register_resources`, which branches on whether the call
+arrives over HTTP:
 
+```abap
+if ( me->http_call = abap_true ).     " base path /sap/bc/adt
+    register /cts/transports
+    register /cts/transportchecks
+    return.                            " <- nothing else is registered
+endif.
+                                       " base path /sap/bc/cts (no ICF node)
+    register /transportrequests ...
 ```
-GET /sap/bc/adt/cts/transports
-    ?user=<username>
-    &target=
-    &category=Workbench
-Accept: application/vnd.sap.cts.transport.worklist+xml; charset=utf-8
+
+On newer releases (S/4HANA) the transport organizer is served under
+`/sap/bc/adt/cts/transportrequests`. On ECC it is not registered over HTTP at
+all. The CLI therefore requires `platform` (`s4` / `ecc`) to be configured, and
+the skill must **ask the user** which it is rather than infer it.
+
+Telling the two 404s apart:
+
+| Body | Content-Type | Meaning |
+|---|---|---|
+| `No suitable resource found` | `text/plain` | ICF routing is fine; that URI is not registered for this release |
+| `Service cannot be reached` (HTML page) | `text/html` | The ICF node itself is missing or unpublished |
+
+### List transports — S/4HANA
+
+```http
+GET /sap/bc/adt/cts/transportrequests?user=<USER>&requestStatus=<D|R>
 ```
 
-Response: XML with transport work items. Parse `TRKORR`, `AS4TEXT` (description), `TRSTATUS` (`D`=open, `R`=released), `AS4USER` (owner).
+`requestStatus` must be sent server-side; otherwise only the released worklist
+comes back.
 
-### Create transport
+### List transports — ECC
 
+```http
+GET /sap/bc/adt/cts/transports?_action=FIND&user=<USER>&trfunction=K
 ```
+
+Handled by `CL_CTS_ADT_RES_OBJ_RECORD->find`, which calls
+`CTS_WBO_API_READ_REQUESTS`. Response is `asx:abap` with one `CTS_REQ_HEADER`
+element per request (`TRKORR`, `TRFUNCTION`, `TRSTATUS`, `TARSYSTEM`,
+`AS4USER`, `AS4DATE`, `AS4TIME`, `AS4TEXT`, `CLIENT`). There is no server-side
+status filter, so filter the parsed rows. It generally returns only modifiable
+requests, so `--status R` is usually empty.
+
+### Create transport — S/4HANA
+
+```http
+POST /sap/bc/adt/cts/transportrequests
+Content-Type: application/vnd.sap.adt.transportorganizer.v1+xml
+```
+
+```xml
+<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm" tm:useraction="newrequest">
+  <tm:request tm:desc="<DESCRIPTION>" tm:type="K" tm:target="<TARGET>" tm:cts_project="">
+    <tm:task tm:owner="<USER>"/>
+  </tm:request>
+</tm:root>
+```
+
+`tm:type` is `K` for Workbench, `W` for Customizing. The target system is chosen
+by the user — never defaulted, even when the value help offers one candidate:
+
+```http
+GET /sap/bc/adt/cts/transportrequests/valuehelp/target?maxItemCount=50
+```
+
+### Create transport — ECC
+
+```http
 POST /sap/bc/adt/cts/transports
-Content-Type: application/vnd.sap.cts.transport.request+xml; charset=utf-8
-
-<?xml version="1.0" encoding="utf-8"?>
-<cts:transportRequest xmlns:cts="http://www.sap.com/cts">
-  <cts:attributes>
-    <cts:attribute name="category"    value="Workbench"/>
-    <cts:attribute name="owner"       value="{username}"/>
-    <cts:attribute name="description" value="{description}"/>
-    <cts:attribute name="target"      value=""/>
-  </cts:attributes>
-</cts:transportRequest>
+Content-Type: application/vnd.sap.as+xml; charset=UTF-8; dataname=com.sap.adt.CreateCorrectionRequest
 ```
 
-Response: `Location` header contains the new transport URI; extract the last path segment as `TRKORR`.
-All attribute values must be XML-escaped before interpolation.
+```xml
+<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0"><asx:values><DATA>
+  <DEVCLASS><PACKAGE></DEVCLASS>
+  <REQUEST_TEXT><DESCRIPTION></REQUEST_TEXT>
+</DATA></asx:values></asx:abap>
+```
+
+Handled by `CL_CTS_ADT_RES_OBJ_RECORD->post` (`CO_RESOURCE_ID = 'TransportRequest'`),
+which reads a `SADT_CREATE_CORR_REQUEST` and calls
+`TR_INSERT_REQUEST_WITH_TASKS`, then `TR_INSERT_NEW_COMM` for the task.
+Consequences:
+
+- **The target is not passed.** The backend derives it from the package via
+  `TR_DEVCLASS_GET` then `TR_GET_TRANSPORT_TARGET`, falling back to `LOCAL`.
+  So the package is mandatory and `--target` is meaningless.
+- **The type is hardcoded to `K`** (Workbench); Customizing is not selectable.
+- **The response is `text/plain`** — a URI whose last segment is the `TRKORR`,
+  not XML and not a `Location` header.
+- An empty or unknown `DEVCLASS` fails in `TR_DEVCLASS_GET` and surfaces as
+  HTTP 500 `Resource   could not be successfully created.`
+
+### Which transports may an object go into (both platforms)
+
+```http
+POST /sap/bc/adt/cts/transportchecks
+Content-Type: application/vnd.sap.as+xml; charset=UTF-8; dataname=com.sap.adt.transport.service.checkData
+```
+
+```xml
+<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0"><asx:values><DATA>
+  <PGMID>R3TR</PGMID><OBJECT>PROG</OBJECT><OBJECTNAME><NAME></OBJECTNAME>
+  <DEVCLASS><PACKAGE></DEVCLASS><OPERATION>I</OPERATION>
+  <URI>/sap/bc/adt/programs/programs/<name></URI>
+</DATA></asx:values></asx:abap>
+```
+
+Read-only. Returns the package text, `KORRFLAG` (transportable), `RESULT` (`S` =
+the object may be created there), `EXISTING_REQ_ONLY`, and a `REQUESTS` list of
+candidate requests. Useful for validating a package and offering the user real
+choices before any write.
 
 ### Release transport
 
-```
+```http
 POST /sap/bc/adt/cts/transports/{TRKORR}?action=release
 ```
 
-Response: 200 = released. Irreversible.
+**S/4HANA only.** On ECC the `/transports/{requestnumber}` URI template is
+registered only on the non-HTTP branch, whose base path `/sap/bc/cts` has no ICF
+node — so no HTTP URL reaches the release handler. Release in SE01/SE09 instead.
 
 ## SICF Service Activation
 

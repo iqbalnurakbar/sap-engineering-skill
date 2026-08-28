@@ -8,7 +8,7 @@ from urllib.parse import quote
 import requests
 
 from .client import make_adt_request
-from .config import get_config
+from .config import PLATFORM_ECC, PLATFORM_S4, get_config, normalize_platform
 
 
 @dataclass
@@ -19,6 +19,18 @@ class AdtResult:
 
 def _base() -> str:
     return get_config().base_url()
+
+
+PLATFORM_HINT = (
+    "Transport commands need to know the backend flavour, because ADT registers "
+    "the CTS resources at different URLs on S/4HANA and on ECC. Ask the user "
+    "which system this is, then run:  sap-adt-cli configure --platform s4|ecc"
+)
+
+
+def _platform() -> str:
+    """Backend flavour ('s4' / 'ecc'), or '' when it has not been stated."""
+    return normalize_platform(getattr(get_config(), "platform", ""))
 
 
 def _enc(name: str) -> str:
@@ -41,6 +53,11 @@ def _err(exc: Exception) -> AdtResult:
 def _xattr(s: str) -> str:
     """Escape a string for safe embedding inside a double-quoted XML attribute value."""
     return s.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _xtext(s: str) -> str:
+    """Escape a string for safe embedding as XML element content."""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def get_program(program_name: str) -> AdtResult:
@@ -496,16 +513,60 @@ def run_sql(sql: str, max_rows: int = 100) -> AdtResult:
         return _err(e)
 
 
-def list_transports(user: str, status: str = "D") -> AdtResult:
+def _parse_transports_ecc(xml_text: str, status_filter: str = "") -> list:
+    """Parse the ECC FIND payload: asx:abap > DATA > CTS_REQ_HEADER rows."""
+    if not xml_text or not xml_text.strip():
+        return []
     try:
-        resp = make_adt_request(
-            f"{_base()}/sap/bc/adt/cts/transportrequests",
-            # requestStatus must be sent server-side: without it ADT returns
-            # only the released worklist, so a client-side "D" filter can
-            # never match. D = modifiable, R = released.
-            params={"user": user, "requestStatus": status},
-        )
-        items = _parse_transports(resp.text, status_filter=status)
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+
+    items = []
+    for elem in root.iter():
+        if _tag_local(elem) != "CTS_REQ_HEADER":
+            continue
+        get = lambda tag: (elem.findtext(tag) or "").strip()
+        trkorr = get("TRKORR")
+        if not trkorr:
+            continue
+        status = get("TRSTATUS")
+        if status_filter and status.upper() != status_filter.upper():
+            continue
+        items.append({
+            "trkorr": trkorr,
+            "description": get("AS4TEXT"),
+            "status": status,
+            "owner": get("AS4USER"),
+            "target": get("TARSYSTEM"),
+        })
+    return items
+
+
+def list_transports(user: str, status: str = "D") -> AdtResult:
+    platform = _platform()
+    if not platform:
+        return AdtResult(text=f"ERROR: platform not configured. {PLATFORM_HINT}", is_error=True)
+    try:
+        if platform == PLATFORM_ECC:
+            # ECC exposes only /cts/transports over HTTP; listing is the FIND
+            # action on it. It cannot filter by status server-side, so the
+            # status filter is applied to the parsed rows.
+            resp = make_adt_request(
+                f"{_base()}/sap/bc/adt/cts/transports",
+                params={"_action": "FIND", "user": user, "trfunction": "K"},
+                timeout=60,
+            )
+            items = _parse_transports_ecc(resp.text, status_filter=status)
+        else:
+            resp = make_adt_request(
+                f"{_base()}/sap/bc/adt/cts/transportrequests",
+                # requestStatus must be sent server-side: without it ADT returns
+                # only the released worklist, so a client-side "D" filter can
+                # never match. D = modifiable, R = released.
+                params={"user": user, "requestStatus": status},
+            )
+            items = _parse_transports(resp.text, status_filter=status)
         return AdtResult(text=json.dumps(items, indent=2))
     except Exception as e:
         return _err(e)
@@ -631,8 +692,10 @@ def create_program(
         )
         return AdtResult(
             text=(f"Created PROGRAM {name} in package {package.upper()} "
-                  f"(HTTP {resp.status_code}). Source is still empty - use "
-                  f"write-source to load it, then activate.")
+                  f"(HTTP {resp.status_code}). Check the source with get-program: "
+                  f"some backends (ECC) seed a header comment plus a REPORT "
+                  f"statement and are activatable as-is, others leave it empty - "
+                  f"use write-source to load it, then activate.")
         )
     except Exception as e:
         return _err(e)
@@ -763,13 +826,73 @@ def _extract_trkorr(resp) -> str:
 
 
 def list_transport_targets() -> list:
-    """Valid transport targets for this system, from the ADT value help."""
+    """Valid transport targets for this system, from the ADT value help.
+
+    S/4HANA only. On ECC the target is not chosen by the caller at all - the
+    backend derives it from the package's transport layer - so this returns [].
+    """
+    if _platform() == PLATFORM_ECC:
+        return []
     resp = make_adt_request(
         f"{_base()}/sap/bc/adt/cts/transportrequests/valuehelp/target",
         params={"maxItemCount": "50"},
     )
     root = ET.fromstring(resp.text)
     return [e.text or "" for e in root.iter() if _tag_local(e) == "name"]
+
+
+def _create_transport_ecc(description: str, package: str) -> AdtResult:
+    """Create a transport request on ECC.
+
+    ECC registers only /cts/transports and /cts/transportchecks under
+    /sap/bc/adt (see CL_CTS_ADT_RES_APP->register_resources, which returns
+    early on the HTTP branch). POSTing to /cts/transports runs
+    CL_CTS_ADT_RES_OBJ_RECORD->post, which reads a SADT_CREATE_CORR_REQUEST
+    and calls TR_INSERT_REQUEST_WITH_TASKS.
+
+    Two consequences for the caller:
+      * the target system is NOT passed - the backend derives it from the
+        package via TR_DEVCLASS_GET + TR_GET_TRANSPORT_TARGET, so the package
+        is mandatory here;
+      * the request type is hardcoded to 'K' (Workbench).
+
+    The response body is plain text: a URI whose last segment is the number.
+    """
+    if not package:
+        return AdtResult(
+            text=("ERROR: --package is required on ECC. The backend derives the "
+                  "transport target from the package's transport layer, so it "
+                  "cannot create the request without one."),
+            is_error=True,
+        )
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">'
+        "<asx:values><DATA>"
+        f"<DEVCLASS>{_xtext(package)}</DEVCLASS>"
+        f"<REQUEST_TEXT>{_xtext(description)}</REQUEST_TEXT>"
+        "</DATA></asx:values></asx:abap>"
+    ).encode("utf-8")
+    resp = make_adt_request(
+        f"{_base()}/sap/bc/adt/cts/transports",
+        method="POST",
+        data=body,
+        extra_headers={
+            "Content-Type": (
+                "application/vnd.sap.as+xml; charset=UTF-8; "
+                "dataname=com.sap.adt.CreateCorrectionRequest"
+            ),
+        },
+        timeout=60,
+    )
+    trkorr = _extract_trkorr(resp)
+    if not trkorr:
+        return AdtResult(
+            text=("Transport POST returned no parseable request number. "
+                  f"Status {resp.status_code}. Body: {(resp.text or '')[:300]}"),
+            is_error=True,
+        )
+    return AdtResult(text=f"Created transport: {trkorr}")
 
 
 def create_transport(
@@ -781,19 +904,24 @@ def create_transport(
 ) -> AdtResult:
     """Create a transport request via the ADT transport organizer.
 
-    Contract taken from /sap/bc/adt/discovery, where the collection
+    S/4HANA contract, taken from /sap/bc/adt/discovery, where the collection
     /sap/bc/adt/cts/transportrequests declares
         <app:accept>application/vnd.sap.adt.transportorganizer.v1+xml</app:accept>
     and the POST body must be rooted at {http://www.sap.com/cts/adt/tm}root.
+    There ``target`` is the transport target system (see
+    list_transport_targets) and ``package`` is ignored.
 
-    ``target`` is the transport target system (see list_transport_targets);
-    SAP needs it to place the request on a transport route.
-
-    ``package`` is not part of this contract and is ignored. It stays in the
-    signature so older callers keep working.
+    ECC uses a different resource entirely - see _create_transport_ecc, where
+    ``package`` is required and ``target``/``category`` do not apply.
     """
-    request_type = "W" if category.upper().startswith("CUST") else "K"
+    platform = _platform()
+    if not platform:
+        return AdtResult(text=f"ERROR: platform not configured. {PLATFORM_HINT}", is_error=True)
     try:
+        if platform == PLATFORM_ECC:
+            return _create_transport_ecc(description, package)
+
+        request_type = "W" if category.upper().startswith("CUST") else "K"
         body = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm"'
@@ -828,6 +956,20 @@ def create_transport(
 
 
 def release_transport(trkorr: str) -> AdtResult:
+    platform = _platform()
+    if not platform:
+        return AdtResult(text=f"ERROR: platform not configured. {PLATFORM_HINT}", is_error=True)
+    if platform == PLATFORM_ECC:
+        # The /cts/transports/{requestnumber} URI template is registered only
+        # on the non-HTTP branch of CL_CTS_ADT_RES_APP->register_resources, and
+        # that branch's base path (/sap/bc/cts) has no ICF node. So no HTTP URL
+        # on ECC reaches the release handler.
+        return AdtResult(
+            text=("ERROR: release-transport is not available over ADT on ECC - the "
+                  "backend does not expose a release endpoint on the HTTP branch. "
+                  "Release the request in SE01/SE09 instead."),
+            is_error=True,
+        )
     try:
         make_adt_request(
             f"{_base()}/sap/bc/adt/cts/transports/{_enc(trkorr)}?action=release",

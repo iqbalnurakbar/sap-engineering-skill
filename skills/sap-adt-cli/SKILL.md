@@ -62,6 +62,7 @@ Language:        EN
 SSL:             verify
 Write mode:      DISABLED
 Transport write: DISABLED
+Platform:        NOT SET (required for transport commands)
 Config source:   /home/user/.sap-adt-cli/config.json
 ```
 
@@ -132,13 +133,15 @@ SAP_PASSWORD="mysecret" python3 "$SAP_CLI" configure \
   --username "DEVELOPER" \
   --client "400" \
   --allow-write \
-  --no-allow-transport
+  --no-allow-transport \
+  --platform ecc
 ```
 
 | Flag | Default | Controls |
 |------|---------|---------|
 | `--allow-write` / `--no-allow-write` | disabled | `write-source`, `activate` |
 | `--allow-transport` / `--no-allow-transport` | disabled | `create-transport`, `release-transport` |
+| `--platform s4\|ecc` | unset | all three transport commands — **ask the user, never infer** |
 
 > **One-time confirmation rule (CRITICAL for agent workflows):**
 > Even when capability flags are enabled, every write/create/release operation
@@ -151,6 +154,31 @@ SAP_PASSWORD="mysecret" python3 "$SAP_CLI" configure \
 > (e.g. a trusted CI pipeline). Never pass `--yes` on behalf of the user
 > based on a previous confirmation in the same conversation.
 
+> **Ask which backend BEFORE any transport command (CRITICAL):**
+> ADT does not expose the Change & Transport System at the same URLs on every
+> release, so `list-transports`, `create-transport` and `release-transport`
+> cannot run until the platform is known. **Ask the user whether the system is
+> S/4HANA or ECC** - do not infer it from the hostname, the SID, the package
+> naming, or the fact that a previous system was one or the other. Then save it:
+>
+> ```bash
+> python3 "$SAP_CLI" configure --platform s4     # S/4HANA
+> python3 "$SAP_CLI" configure --platform ecc    # ECC / NetWeaver
+> ```
+>
+> `configure --platform` preserves every other saved setting, so it is safe to
+> run on an already-configured system. `status` shows the current value. The
+> transport commands abort with an explanatory error while it is unset.
+>
+> The two platforms need different options for `create-transport`:
+>
+> | | S/4HANA | ECC |
+> |---|---|---|
+> | required | `--target` (never defaulted - ask) | `--package` (never inferred - ask) |
+> | target system | chosen by the user | derived by the backend from the package |
+> | `--category` | Workbench or Customizing | always Workbench (backend fixes it) |
+> | `release-transport` | supported | **not available** - use SE01/SE09 |
+
 > **Ask, do not infer, before an object-creating write (CRITICAL):**
 > `create-transport` and `create-program` take values that belong to the user,
 > not to the agent. If the user has not supplied one, **ask** — batched into a
@@ -159,7 +187,8 @@ SAP_PASSWORD="mysecret" python3 "$SAP_CLI" configure \
 > | Command | Must come from the user |
 > |---|---|
 > | `create-program` | package (DEVCLASS), description/title, transport, program type if not a plain report |
-> | `create-transport` | description, category (Workbench vs Customizing), **target system** |
+> | `create-transport` (S/4HANA) | description, category (Workbench vs Customizing), **target system** |
+> | `create-transport` (ECC) | description, **package** - the target is derived from it |
 >
 > Do not copy a package from a similarly named object, and do not invent a
 > transport description from a naming convention. A wrong package fixes the
@@ -223,9 +252,9 @@ unless the user explicitly authorizes write or transport operations.
 | `activate` | `activate <TYPE> <NAME>` | Activate ABAP object *(allow_write + confirm each time)* |
 | `where-used` | `where-used <TYPE> <NAME> [--max-results N]` | Where-used list → JSON array |
 | `run-sql`           | `run-sql "<SQL>" [--max-rows N]`               | Open SQL SELECT → JSON; DML statements are blocked      |
-| `list-transports` | `list-transports [--user U] [--status D\|R]` | List transport requests → JSON |
-| `create-transport` | `create-transport --description "<DESC>"` | Create transport request *(allow_transport + confirm each time)* |
-| `release-transport` | `release-transport <TRKORR> [--yes]` | Release transport — irreversible *(allow_transport + confirm each time)* |
+| `list-transports` | `list-transports [--user U] [--status D\|R]` | List transport requests → JSON *(needs `platform`)* |
+| `create-transport` | S/4: `create-transport --description "<D>" --target <SYS>`<br>ECC: `create-transport --description "<D>" --package <PKG>` | Create transport request *(allow_transport + `platform` + confirm each time)* |
+| `release-transport` | `release-transport <TRKORR> [--yes]` | Release transport — irreversible *(S/4HANA only; not available on ECC)* |
 
 ---
 
@@ -271,10 +300,15 @@ python3 "$SAP_CLI" run-sql "SELECT * FROM t001 UP TO 10 ROWS"
 python3 "$SAP_CLI" run-sql "SELECT bukrs, butxt FROM t001 WHERE spras = 'EN'" --max-rows 200
 
 # Transport management
-python3 "$SAP_CLI" list-transports                        # read-only — no flag needed
+python3 "$SAP_CLI" configure --platform ecc               # ask the user first; keeps other settings
+python3 "$SAP_CLI" list-transports                        # read-only, but needs platform set
 python3 "$SAP_CLI" list-transports --user SHREK --status D
-python3 "$SAP_CLI" create-transport --description "Fix rounding issue"   # allow_transport + confirm
-python3 "$SAP_CLI" release-transport DEVK900001           # allow_transport + confirm (irreversible warning)
+
+# create — the required option depends on the platform
+python3 "$SAP_CLI" create-transport --description "Fix rounding issue" --target QAS      # S/4HANA
+python3 "$SAP_CLI" create-transport --description "Fix rounding issue" --package ZMM     # ECC
+
+python3 "$SAP_CLI" release-transport DEVK900001           # S/4HANA only — not available on ECC
 python3 "$SAP_CLI" release-transport DEVK900001 --yes     # skip confirm (trusted automation only)
 ```
 
@@ -306,6 +340,28 @@ python3 "$SAP_CLI" release-transport DEVK900001 --yes     # skip confirm (truste
   `finally` so objects are never left locked after an error.
 - **`release-transport` is irreversible**: once released, a transport cannot be
   recalled. The confirmation preview explicitly calls this out.
+- **Transport endpoints are release-specific**: ADT registers the CTS resources
+  under different URLs depending on the backend, which is why `platform` must be
+  set. On S/4HANA the transport organizer lives at
+  `/sap/bc/adt/cts/transportrequests`. On ECC that URI is not registered at all —
+  only `/sap/bc/adt/cts/transports` (list via `?_action=FIND`, create via POST)
+  and `/sap/bc/adt/cts/transportchecks` are. A 404 reading
+  `No suitable resource found` means the URI is not registered for that release;
+  an HTML "Service cannot be reached" page means the ICF node itself is missing.
+- **Not every ADT service exists on ECC.** Confirmed absent on an ECC 6.0
+  backend (all return 404 `No suitable resource found`): `datapreview`
+  (so `run-sql` is unavailable), `checkruns` (so `syntax-check` is unavailable),
+  `cts/transportrequests`, and the transport release endpoint. Reads, search,
+  `create-program`, `write-source`, `activate`, `where-used`, `transportchecks`
+  and the ECC transport create/list paths all work. Probe rather than assume.
+- **`create-program` seeds differently per backend**: on ECC the new shell
+  already contains a header comment block and `REPORT <name>.`, so it activates
+  as-is; elsewhere the source may be empty and need `write-source` first. Check
+  with `get-program` before assuming.
+- **ECC transport quirks**: the target system is derived from the package, not
+  passed; the request type is always `K` (Workbench); `--status R` usually
+  returns nothing because the backend's FIND returns only modifiable requests;
+  and there is no release endpoint, so releasing must happen in SE01/SE09.
 - **`run-sql` Open SQL only**: uses ADT Data Preview; accepts SAP Open SQL syntax
   (e.g. `UP TO N ROWS`), not Native SQL or JDBC-style syntax.
 - **`run-sql` DML blocked**: statements starting with `INSERT`, `UPDATE`, `DELETE`,
@@ -399,7 +455,8 @@ python3 "$SAP_CLI" run-sql "SELECT COUNT(*) AS CNT FROM ekko WHERE bstyp = 'F'"
 
 **Create and release a transport (two separate confirmations):**
 ```bash
-python3 "$SAP_CLI" create-transport --description "Sprint 12 — invoice fix"
+python3 "$SAP_CLI" configure --platform s4   # ask the user which backend first
+python3 "$SAP_CLI" create-transport --description "Sprint 12 — invoice fix" --target QAS
 # → preview shown, confirmation #1 required → Created transport: DEVK900042
 python3 "$SAP_CLI" list-transports --status D
 # → JSON list (read-only, no confirmation)
@@ -415,7 +472,8 @@ python3 "$SAP_CLI" release-transport DEVK900042
 - User authorization: role `SAP_ADT_BASE` or objects `S_ADT_RES`, `S_RFC`
 - **Write & activate** (`write-source`, `activate`): requires `allow_write: true` in config.
   SAP user additionally needs `S_DEVELOP` with `ACTVT=02` on relevant object types.
-- **Transport management** (`create/release-transport`): requires `allow_transport: true` in config.
+- **Transport management** (`create/release-transport`): requires `allow_transport: true`
+  **and** `platform` set to `s4` or `ecc` in config (ask the user which).
   SAP user needs `S_CTS_ADMI` or equivalent transport authorization.
   `list-transports` is read-only and needs no additional flag.
 - **Data Preview** (`run-sql`): requires `/sap/bc/adt/datapreview` active in transaction SICF.

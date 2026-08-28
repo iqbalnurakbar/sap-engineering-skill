@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -38,7 +39,40 @@ Optional:
   SAP_VERIFY_SSL - Set to 0 to disable SSL verification (default: 1)
   SAP_ALLOW_WRITE - Set to 1 to enable source write commands (default: 0)
   SAP_ALLOW_TRANSPORT - Set to 1 to enable transport write commands (default: 0)
+  SAP_PLATFORM   - Backend flavour: 's4' (S/4HANA) or 'ecc' (ECC / NetWeaver).
+                   Required for transport commands; ADT registers the CTS
+                   endpoints at different URLs on the two platforms.
 """.format(skill_dotenv=_SKILL_DOTENV)
+
+
+PLATFORM_S4 = "s4"
+PLATFORM_ECC = "ecc"
+VALID_PLATFORMS = (PLATFORM_S4, PLATFORM_ECC)
+
+# ADT registers the Change & Transport System resources at different URLs
+# depending on the backend release, so transport commands must know which
+# flavour they are talking to. See references/adt_api.md.
+_PLATFORM_S4_PREFIXES = ("s4", "hana")
+_PLATFORM_ECC_PREFIXES = ("ecc", "erp", "r3", "netweaver", "nw")
+
+
+def normalize_platform(value: Optional[str]) -> str:
+    """Map a user-supplied platform label onto 's4' / 'ecc'; '' when unrecognised.
+
+    Accepts the many ways people write these: "S/4HANA", "s4", "ECC 6.0",
+    "ecc", "NetWeaver", "R/3". Anything else returns "" so the caller can ask
+    rather than guess.
+    """
+    if not value:
+        return ""
+    key = re.sub(r"[^a-z0-9]", "", str(value).lower())
+    if not key:
+        return ""
+    if key.startswith(_PLATFORM_S4_PREFIXES):
+        return PLATFORM_S4
+    if key.startswith(_PLATFORM_ECC_PREFIXES):
+        return PLATFORM_ECC
+    return ""
 
 
 @dataclass
@@ -51,6 +85,7 @@ class SapConfig:
     verify_ssl: bool = True
     allow_write: bool = False
     allow_transport: bool = False
+    platform: str = ""
 
     def base_url(self) -> str:
         from urllib.parse import urlparse
@@ -115,6 +150,7 @@ def load_config_with_source() -> Tuple[Optional[SapConfig], Optional[str]]:
             "SAP_VERIFY_SSL",
             "SAP_ALLOW_WRITE",
             "SAP_ALLOW_TRANSPORT",
+            "SAP_PLATFORM",
         ]
         return SapConfig(
             url=url,
@@ -125,6 +161,7 @@ def load_config_with_source() -> Tuple[Optional[SapConfig], Optional[str]]:
             verify_ssl=_env_value("SAP_VERIFY_SSL", dotenv, "1") != "0",
             allow_write=_env_bool("SAP_ALLOW_WRITE", dotenv),
             allow_transport=_env_bool("SAP_ALLOW_TRANSPORT", dotenv),
+            platform=normalize_platform(_env_value("SAP_PLATFORM", dotenv)),
         ), _env_source(source_keys, dotenv)
 
     if not CONFIG_FILE.exists() and _OLD_CONFIG_FILE.exists():
@@ -160,6 +197,7 @@ def load_config_with_source() -> Tuple[Optional[SapConfig], Optional[str]]:
             verify_ssl=data.get("verify_ssl", True),
             allow_write=data.get("allow_write", False),
             allow_transport=data.get("allow_transport", False),
+            platform=normalize_platform(data.get("platform", "")),
         ), str(CONFIG_FILE)
     except (json.JSONDecodeError, KeyError):
         return None, None
@@ -191,9 +229,10 @@ def save_config_from_flags(
     password: Optional[str],
     client: Optional[str],
     language: Optional[str] = None,
-    verify_ssl: bool = True,
-    allow_write: bool = False,
-    allow_transport: bool = False,
+    verify_ssl: Optional[bool] = None,
+    allow_write: Optional[bool] = None,
+    allow_transport: Optional[bool] = None,
+    platform: Optional[str] = None,
 ) -> SapConfig:
     existing = load_config()
     resolved_url = url or getattr(existing, "url", None)
@@ -201,6 +240,23 @@ def save_config_from_flags(
     resolved_password = password or getattr(existing, "password", None)
     resolved_client = client or getattr(existing, "client", None)
     resolved_language = language or getattr(existing, "language", None) or "EN"
+    if platform and not normalize_platform(platform):
+        print(
+            f"Error: unknown --platform '{platform}'. Use one of: {', '.join(VALID_PLATFORMS)}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    resolved_platform = normalize_platform(platform) or getattr(existing, "platform", "") or ""
+
+    def _keep(new_value, attr, default):
+        """None means 'not specified on this call' - keep what is already saved."""
+        if new_value is None:
+            return getattr(existing, attr, default) if existing else default
+        return new_value
+
+    resolved_verify_ssl = _keep(verify_ssl, "verify_ssl", True)
+    resolved_allow_write = _keep(allow_write, "allow_write", False)
+    resolved_allow_transport = _keep(allow_transport, "allow_transport", False)
 
     missing = [name for name, val in [
         ("--url", resolved_url),
@@ -219,9 +275,10 @@ def save_config_from_flags(
         password=resolved_password,
         client=resolved_client,
         language=resolved_language,
-        verify_ssl=verify_ssl,
-        allow_write=allow_write,
-        allow_transport=allow_transport,
+        verify_ssl=resolved_verify_ssl,
+        allow_write=resolved_allow_write,
+        allow_transport=resolved_allow_transport,
+        platform=resolved_platform,
     )
     save_config(config)
     print(f"Configuration saved to {CONFIG_FILE}")
@@ -268,6 +325,22 @@ def run_configure_wizard() -> SapConfig:
     )
     allow_transport = allow_transport_raw.lower() in ("y", "yes")
 
+    # Transport endpoints differ between S/4HANA and ECC, so the flavour has to
+    # be stated rather than guessed.
+    platform = ""
+    while True:
+        platform_raw = _prompt(
+            "Backend platform - 's4' (S/4HANA) or 'ecc' (ECC / NetWeaver)",
+            getattr(existing, "platform", "") or "",
+        )
+        if not platform_raw:
+            print("  (left unset - transport commands will ask for it later)")
+            break
+        platform = normalize_platform(platform_raw)
+        if platform:
+            break
+        print(f"  Unknown platform '{platform_raw}'. Enter 's4' or 'ecc'.")
+
     config = SapConfig(
         url=url,
         username=username,
@@ -277,6 +350,7 @@ def run_configure_wizard() -> SapConfig:
         verify_ssl=verify_ssl,
         allow_write=allow_write,
         allow_transport=allow_transport,
+        platform=platform,
     )
     save_config(config)
     print(f"\nConfiguration saved to {CONFIG_FILE}")
