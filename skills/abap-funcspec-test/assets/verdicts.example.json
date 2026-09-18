@@ -1,0 +1,104 @@
+{
+  "meta": {
+    "run_date": "2026-09-14",
+    "program": "ZEXAMPLE_PROGRAM",
+    "tcode": "ZEXAMPLE",
+    "spec_file": "Funcspec Example v1.5 - As-Built 20260908.xlsx",
+    "spec_sheet": "09 Build Gates & Unit Test",
+    "spec_version": "v1.5, dated 2026-09-08",
+    "source_root": "BUILD 20260911 EDITABLE",
+    "source_revision": "r42; include files dated 2026-09-11",
+    "tester": "Source-code review"
+  },
+  "unit_tests": [
+    {
+      "id": "UT-01",
+      "case": "Non FP button and field rules via ZINV_VER_NFP",
+      "covers": "Task 1c",
+      "expected": "Screen accepts without faktur pajak; E-04 when Invoice empty; title shows 'Non Faktur Pajak'",
+      "verdict": "NA",
+      "evidence": [
+        {
+          "file": "ZEXAMPLE_PROGRAM_9001.abap",
+          "line": 12,
+          "code": "PROCESS BEFORE OUTPUT.   \" screen export lists no Non-FP field"
+        },
+        {
+          "file": "ZEXAMPLE_PROGRAM_TOP.abap",
+          "line": 88,
+          "code": "* no gv_nonfp flag is declared anywhere in the program"
+        }
+      ],
+      "notes": "Confirmed absent, not merely asserted by the spec: searched ZINV_VER_NFP, gv_nonfp, 'Non Faktur Pajak' and E-04 across all includes and the screen export - no hit, including in comments. The program has a single path.",
+      "test_steps": ""
+    },
+    {
+      "id": "UT-05",
+      "case": "Posting blocked when no assessment exists",
+      "covers": "DD-04",
+      "expected": "Posting is refused; message E-12 is raised",
+      "verdict": "SPEC_STALE",
+      "evidence": [
+        {
+          "file": "ZEXAMPLE_PROGRAM_F01.abap",
+          "line": 1842,
+          "code": "IF lv_assmt_guid IS INITIAL."
+        },
+        {
+          "file": "ZEXAMPLE_PROGRAM_F01.abap",
+          "line": 1845,
+          "code": "MESSAGE 'Assessment not found.' TYPE 'W'."
+        }
+      ],
+      "notes": "Spec expects a hard block (E-12). The code warns with TYPE 'W', so the user can press Enter and continue. The DD-04 block was retired in r38 - see FINDINGS Disable Change Document.md. Spec row predates that change.",
+      "test_steps": ""
+    },
+    {
+      "id": "UT-06a",
+      "case": "Concurrent posting on the same assessment - lock collision",
+      "covers": "DD-07",
+      "expected": "User B is refused while user A holds the lock",
+      "verdict": "NEEDS_SYSTEM",
+      "evidence": [
+        {
+          "file": "ZEXAMPLE_PROGRAM_F01.abap",
+          "line": 2110,
+          "code": "CALL FUNCTION 'ENQUEUE_EZFI_WHT_ASSMT'"
+        },
+        {
+          "file": "ZEXAMPLE_PROGRAM_F01.abap",
+          "line": 2121,
+          "code": "IF sy-subrc <> 0. MESSAGE 'Assessment is locked by another user.' TYPE 'E'."
+        }
+      ],
+      "notes": "The lock is requested and sy-subrc is handled, so the mechanism exists. Whether B is actually refused depends on real lock timing and cannot be settled from source.",
+      "test_steps": [
+        "Two SAP sessions, users A and B, same company code and vendor",
+        "A opens ZEXAMPLE for assessment key 1000/0001000123/INV-001/2026-09-01 and stops before Save",
+        "B opens the same key and presses Save",
+        "Expect B to receive 'Assessment is locked by another user.' as an E message",
+        "Check SM12 for lock object EZFI_WHT_ASSMT while A holds it"
+      ]
+    }
+  ],
+  "build_gates": [
+    {
+      "id": "BG-1",
+      "gate": "In-scope withholding tax types permit manual base entry",
+      "verdict": "NEEDS_SYSTEM",
+      "evidence": [
+        {
+          "file": "ZEXAMPLE_PROGRAM_F01.abap",
+          "line": 640,
+          "code": "SELECT witht wt_withcd FROM t059z INTO TABLE lt_types WHERE land1 = 'ID'."
+        }
+      ],
+      "notes": "The program reads T059Z but does not itself enforce manual base entry; that is configuration. Source shows only which types it will consider.",
+      "test_steps": [
+        "SPRO > Financial Accounting > Withholding Tax > Extended Withholding Tax > Calculation > Withholding Tax Type",
+        "For each in-scope type, confirm 'Manual base amount' (W_TAX_BASE_MAN) is allowed",
+        "If not allowed, the base population per DD-02 fails silently - note which type"
+      ]
+    }
+  ]
+}
