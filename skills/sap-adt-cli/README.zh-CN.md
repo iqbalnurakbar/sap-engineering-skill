@@ -14,7 +14,9 @@
 - SAP 系统（本地 ECC / S/4HANA 或 BTP ABAP），需已激活 ADT 服务
 - 拥有 `SAP_ADT_BASE` 角色（或等效权限）的 SAP 对话用户
 
-依赖包（`click`、`requests`、`urllib3`）在首次运行时自动安装。
+核心依赖（`click`、`requests`、`urllib3`）在首次运行时自动安装。密钥库后端为可选项：
+桌面系统密钥库需 `pip install keyring`，加密文件兜底需 `pip install cryptography`
+（WSL2 两者都不需要——直接使用 Windows DPAPI）。详见[凭据存储（密钥库）](#凭据存储密钥库)。
 
 ---
 
@@ -91,7 +93,7 @@ SAP 集团        — 3 位集团编号，例如 100
 跳过 SSL 验证？  — 内网或自签名证书环境选 yes
 ```
 
-凭据可从进程环境变量、SKILL 目录下的 `.env` 或 `~\.sap-adt-cli\config.json` 加载，后续会话自动复用。
+非密连接信息保存在 `~/.sap-adt-cli/config.json` 的环境 profile 中，**口令只存入操作系统密钥库，不再明文落盘**。支持多套 SAP 系统（DEV/QAS/PRD）命名 profile，详见[凭据存储（密钥库）](#凭据存储密钥库)与[多 SAP 环境（Profile）](#多-sap-环境profile)。
 
 ### 支持的 AI 智能体
 
@@ -117,7 +119,8 @@ opencode 仅作为示例。`sap-adt-cli` 实现了标准 Agent Skill 接口（`S
 git clone https://github.com/shrek-abaper/sap-engineering-skill
 cd sap-engineering-skill
 
-# 2. 配置凭据（交互式向导 — 密码不回显）
+# 2. 配置凭据（交互式向导 — 密码不回显，并存入操作系统密钥库；
+#    之后可用 configure --profile qas / prd 添加更多环境）
 python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
 
 # 3. 验证连接
@@ -137,7 +140,42 @@ python3 skills/sap-adt-cli/scripts/sap_adt_cli.py get-function BAPI_SALESORDER_C
 
 1. 进程环境变量
 2. `skills/sap-adt-cli/.env`
-3. `~/.sap-adt-cli/config.json`
+3. `~/.sap-adt-cli/config.json` 中选中 profile 的非密字段，口令则从操作系统密钥库读取——见[凭据存储（密钥库）](#凭据存储密钥库)
+
+### 多 SAP 环境（Profile）
+
+每套 SAP 系统以命名 profile 的形式保存在 `~/.sap-adt-cli/config.json` 中
+（只存非密字段，口令存入密钥库）。首次运行 `configure` 会创建名为
+`default` 的 profile；旧的单连接配置会自动迁移：
+
+```bash
+CLI="python3 skills/sap-adt-cli/scripts/sap_adt_cli.py"
+
+# 添加环境（每次保存的 profile 会成为当前生效环境）
+$CLI configure --profile dev --url "https://sap-dev:8000" --username DEV --client 100
+$CLI credentials set dev                       # 随后以隐藏输入存入口令
+SAP_PASSWORD="..." $CLI configure --profile prd --url "https://sap-prd:8000" --username PRD --client 200
+                                               # ^ SAP_PASSWORD 会被转入密钥库，不会留在 config.json
+
+# 列出所有环境，* 为当前生效
+$CLI profile list
+
+# 粘性切换（持久化）
+$CLI profile use dev
+
+# 单次覆盖：全局参数 --profile（放在命令名之前）或 SAP_PROFILE 环境变量
+$CLI --profile prd get-program SAPMV45A
+SAP_PROFILE=qas $CLI status
+
+# 删除环境（当前生效的 profile 不能删）
+$CLI profile remove qas
+```
+
+profile 选择优先级：`--profile` > `SAP_PROFILE` > `profile use` 设置的 active profile。
+请注意写入/传输能力开关是**全局**的，对所有环境（含 PRD）都生效。
+
+> 当环境变量或 SKILL 本地 `.env` 中同时存在完整的 `SAP_URL/USERNAME/PASSWORD/CLIENT`
+> 四个变量时，它们会整体覆盖所有 profile；可运行 `status` 查看实际生效的配置来源。
 
 ### SKILL 本地 `.env`（推荐用于技能隔离）
 
@@ -155,37 +193,72 @@ python3 skills/sap-adt-cli/scripts/sap_adt_cli.py status
 python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
 ```
 
-凭据保存至 `~/.sap-adt-cli/config.json`，文件权限为 `0600`。
+非密字段以 profile 形式（向导会询问 profile 名称）保存至 `~/.sap-adt-cli/config.json`（`0600`），口令写入当前选中的密钥库。对已存在的 profile 再次运行向导时，密码留空表示保留原密码。
 
-> **安全提示：** 配置文件以明文存储凭据。  
-> 请勿将其提交到版本控制系统，并限制文件访问权限。
+### 凭据存储（密钥库）
+
+口令只允许经可插拔密钥库后端存取，后端按**实际能力探测**选择（而非按操作系统分支），优先级如下：
+
+| # | 后端 | 适用环境 | 前置准备 | 一次性配置 |
+|---|------|----------|----------|------------|
+| 1 | `env` | 容器 / CI / 任意 | 无 | `export SAP_ADT_<PROFILE>_PASSWORD=...`（只读） |
+| 2 | `keyring` | 原生 Windows、macOS、Linux 桌面 | `pip install keyring`（凭据管理器 / Keychain / Secret Service） | 无 |
+| 3 | `dpapi` | **WSL2** | 无（经 `powershell.exe` interop 使用 Windows DPAPI） | 无 |
+| 4 | `pass` | 有 GPG 的无图形 Linux | 安装并初始化 [`pass`](https://www.passwordstore.org/)（`pass init`） | 无 |
+| 5 | `file` | 兜底，全平台 | `pip install cryptography` | 主口令（交互输入，或 `SAP_ADT_MASTER_PASSPHRASE`） |
+
+刻意不提供 `credentials export` 命令。诊断当前后端：
+
+```bash
+python3 skills/sap-adt-cli/scripts/sap_adt_cli.py credentials doctor
+# 强制指定后端（不可用时直接报错，不静默回退）
+python3 skills/sap-adt-cli/scripts/sap_adt_cli.py --keystore file credentials status
+```
+
+口令管理：
+
+```bash
+CLI="python3 skills/sap-adt-cli/scripts/sap_adt_cli.py"
+$CLI credentials set dev          # 隐藏输入并二次确认
+$CLI credentials status           # 逐 profile 显示 已配置/未配置，绝不回显口令
+$CLI credentials forget dev       # 从所有可写后端清除
+```
+
+> **密钥库中的口令不可跨机器、跨平台复制。** DPAPI 绑定 Windows 账户、Keychain 绑定 macOS 登录态，拷贝 `secrets.json` 或配置到其他机器/用户无法解密——换机后重新执行 `credentials set` 是预期行为，不是 bug。
+>
+> **旧版本迁移：** 首次运行时若发现 `config.json` 中仍有明文口令，会自动迁移到当前密钥库、原地删除明文字段（不生成备份文件），并提示由于口令曾经明文落盘，建议在 SAP 侧修改口令。
 
 ### 环境变量
 
-适用于 CI/CD 流水线或临时会话。环境变量优先级高于 SKILL 本地 `.env` 和配置文件。
+适用于 CI/CD 流水线或临时会话。完整连接四件套的优先级高于 SKILL 本地 `.env` 和所有 profile。
 
 ```bash
 export SAP_URL=https://my-sap.example.com:8000
 export SAP_USERNAME=MYUSER
-export SAP_PASSWORD=secret          # 推荐使用此方式，避免 --password 参数暴露在命令历史中
+export SAP_PASSWORD=secret          # 完整连接覆盖；推荐使用此方式，避免 --password 暴露在命令历史中
 export SAP_CLIENT=100
+export SAP_PROFILE=dev              # 可选：选择使用的 profile（SAP_URL..SAP_CLIENT 四者齐全时此项被忽略）
 export SAP_LANGUAGE=EN              # 可选，默认：EN
 export SAP_VERIFY_SSL=0             # 可选：设为 0 以跳过自签名证书验证
 export SAP_ALLOW_WRITE=0            # 可选：设为 1 以开启 write-source/activate
 export SAP_ALLOW_TRANSPORT=0        # 可选：设为 1 以开启 create/release transport
+
+# env 密钥库的按 profile 口令（profile dev 对应变量 SAP_ADT_DEV_PASSWORD）
+export SAP_ADT_DEV_PASSWORD=secret
+# file 密钥库非交互运行时的主口令
+export SAP_ADT_MASTER_PASSPHRASE=...
 ```
 
 ### 能力标志（默认：关闭）
 
-两个可选标志用于解锁写入和传输能力。**仅在开发系统上开启。**
+两个可选标志用于解锁写入和传输能力。**仅在确有需要时开启——它们是全局开关，对所有 profile（含生产环境）都生效。** 执行写操作前建议先运行 `status` 确认当前 profile 和开关状态。
 
 ```bash
-# 交互式开启
-python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
-# → 在写入/传输提示处输入 'y'
+# 交互式开启（在写入/传输提示处输入 'y'）
+python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure --profile dev
 
 # 非交互式开启
-SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure \
+SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure --profile dev \
   --url "https://sap-dev.example.com:44300" \
   --username "DEVELOPER" \
   --client "400" \
@@ -193,7 +266,7 @@ SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configur
   --no-allow-transport
 ```
 
-| 标志 | 配置字段 | 默认值 | 解锁的命令 |
+| 标志 | 配置字段（全局，对所有 profile 生效） | 默认值 | 解锁的命令 |
 |------|---------|--------|----------|
 | `--allow-write` | `allow_write` | false | `write-source`、`activate` |
 | `--allow-transport` | `allow_transport` | false | `create-transport`、`release-transport` |
@@ -203,12 +276,16 @@ SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configur
 ### 非交互式参数（智能体 / 自动化工作流）
 
 ```bash
-# 通过环境变量传递密码，避免暴露在 Shell 历史记录中
-SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure \
+# 通过环境变量传递密码，避免暴露在 Shell 历史记录中。
+# configure 会把口令转入密钥库，不会留在 config.json。
+SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure --profile dev \
   --url      "https://my-sap.example.com:8000" \
   --username "MYUSER" \
   --client   "100"
 ```
+
+CI 运行期也可以按 profile 直接提供口令：`SAP_ADT_<PROFILE>_PASSWORD`（只读的
+`env` 后端），或配合 `--keystore file` 使用 `SAP_ADT_MASTER_PASSPHRASE`。
 
 ---
 
@@ -216,8 +293,18 @@ SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configur
 
 | 命令 | 说明 |
 |------|------|
-| `configure` | 保存连接凭据 |
-| `status` | 显示当前连接配置 |
+| `configure [--profile NAME]` | 保存某套环境 profile 的连接凭据（向导或参数） |
+| `profile list` | 列出所有环境（`*` 为当前生效） |
+| `profile use <NAME>` | 粘性切换当前生效环境 |
+| `profile remove <NAME>` | 删除环境（当前生效的 profile 受保护）并清除其口令 |
+| `credentials set <NAME>` | 将 profile 口令存入密钥库（隐藏输入） |
+| `credentials forget <NAME>` | 从所有可写密钥库清除 profile 口令 |
+| `credentials status` | 逐 profile 显示已配置/未配置（不回显口令） |
+| `credentials doctor` | 诊断后端可用性、当前选中后端、文件与条目 |
+| `--keystore <env\|keyring\|dpapi\|pass\|file> <命令>` | 全局参数：强制指定凭据后端（不可用时报错，不回退） |
+| `-v, --verbose` | 详细日志（敏感信息始终脱敏） |
+| `status` | 显示当前生效 profile 及连接配置 |
+| `--profile NAME <命令>` | 全局参数：对单条命令临时指定 profile |
 | `get-program <NAME>` | ABAP 程序 / 报表源代码 |
 | `get-class <NAME>` | ABAP 类源代码 |
 | `get-function-group <NAME>` | 函数组顶层 Include 源代码 |
@@ -238,7 +325,7 @@ SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configur
 | `write-source <TYPE> <NAME> --file <PATH> [--activate] [--group <FG>] [--transport <TRKORR>]` | 写入源代码 *（需 allow_write + 每次确认）*；`--activate` 可在写入后立即激活；TYPE 为 `function` 时需指定 `--group`；`--transport` 指定传输请求编号 |
 | `activate <TYPE> <NAME> [--group <FG>]` | 激活 ABAP 对象 *（需 allow_write + 每次确认）*；TYPE 为 `function` 时需指定 `--group` |
 | `list-transports [--user U] [--status D\|R]` | 列出传输请求（JSON，只读）；`--status` 默认为 `D`（开发中） |
-| `create-transport --description "<DESC>" [--category Workbench\|Customizing]` | 创建传输请求 *（需 allow_transport + 每次确认）*；默认类别：`Workbench` |
+| `create-transport --package <DEVCLASS> --description "<DESC>" --ref <object-uri>` | 通过 CreateCorrectionRequest 创建传输请求 *（需 allow_transport + 每次确认）*；必须提供包与对象 REF；`$TMP` 创建本地请求；Basis 7.56 真机验证（2026-09-17） |
 | `release-transport <TRKORR> [--yes]` | 释放传输——不可逆 *（需 allow_transport + 每次确认）* |
 
 任意命令加 `--help` 查看完整参数说明。
@@ -281,7 +368,8 @@ python3 $CLI activate class ZCL_MY_CLASS
 
 # 传输管理
 python3 $CLI list-transports --status D                              # 只读
-python3 $CLI create-transport --description "My feature"            # 需 allow_transport + 确认
+python3 $CLI create-transport --package '$TMP' --description "My feature" \
+  --ref /sap/bc/adt/programs/programs/zmy_feature/source/main        # 需 allow_transport + 确认
 python3 $CLI release-transport DEVK900001                           # 需 allow_transport + 确认
 ```
 
@@ -328,7 +416,10 @@ python3 $CLI release-transport DEVK900001                           # 需 allow_
 | 错误 | 原因 | 解决方法 |
 |------|------|----------|
 | `Not configured` | 未保存凭据 | 运行 `configure` |
-| `HTTP 401` | 用户名或密码错误 | 重新运行 `configure` |
+| `Profile 'x' not found` | `--profile`/`SAP_PROFILE` 指定了不存在的环境 | 运行 `profile list` 查看，或用 `configure --profile x` 创建 |
+| 删除时提示 `is currently active` | 当前生效的 profile 不允许删除 | 先 `profile use <其他环境>` 再删除 |
+| `HTTP 401` | 用户名或密码错误 | 重新运行 `configure` 或 `credentials set <profile>` |
+| `no password ... in the keystore` | profile 没有已存口令 | `credentials set <profile>`（或 `credentials doctor`） |
 | `HTTP 403` | 缺少 `SAP_ADT_BASE` 角色 | 联系 Basis 分配权限 |
 | `HTTP 404` | 对象名称不存在 | 使用 `search-object` 查找正确名称 |
 | `HTTP 503` | `/sap/bc/adt` 未激活 | 联系 Basis 在 `SICF` 中激活服务 |
@@ -338,17 +429,36 @@ python3 $CLI release-transport DEVK900001                           # 需 allow_
 
 ## 安全注意事项
 
-- `skills/sap-adt-cli/.env` 或 `~/.sap-adt-cli/config.json` 中的凭据均为**明文**。
-  请勿提交 `.env`，并限制 JSON 配置文件访问权限（`0600`）。
-- 避免通过 `--password` 参数传递密码——它会出现在 Shell 历史记录和 `ps` 输出中。  
-  推荐使用交互式 `configure` 向导或 `SAP_PASSWORD` 环境变量。
+- **口令绝不以明文存储。** `~/.sap-adt-cli/config.json` 只保留非密字段（URL、用户名、client、语言、TLS 开关）；口令存入操作系统密钥库（WSL 用 DPAPI，另有凭据管理器、Keychain、Secret Service、GPG `pass`、口令派生加密文件兜底）。运行 `credentials doctor` 可查看当前后端。旧的明文配置会在首次运行时自动迁移并清除字段。
+- DPAPI/Keychain 中的口令**不能跨机器、跨用户复制**；换机后需重新 `credentials set`。请勿提交 `secrets.json`、`secrets.enc` 或任何 `.env`；配置目录应放在原生文件系统上（WSL 的 `/mnt/c` 上 chmod 无效，`credentials doctor` 会给出警告）。
+- 避免通过 `--password` 传口令——会出现在 Shell 历史和 `ps` 中。优先使用 `configure` / `credentials set` 的隐藏输入、`SAP_ADT_<PROFILE>_PASSWORD` 或 `SAP_PASSWORD`。
+- 日志（含 `-v/--verbose`）和 HTTP 异常 traceback 都会对 `Authorization` 头和口令字面量脱敏；刻意不提供 `credentials export` 命令。
 - 写入与传输命令需要显式开启能力标志（`allow_write`、`allow_transport`）并逐次 `[y/N]` 确认。  
   **切勿在生产系统上开启。**
+- 可选依赖保持可选：桌面密钥库 `pip install keyring`，加密文件兜底 `pip install cryptography`（即 `[file]` extra）；CLI 核心保持轻依赖。
 - 在共享环境或 CI 环境中，建议使用短期凭据并定期轮换。
 
 ---
 
 ## 版本历史
+
+### v1.3.0 — 密钥库凭据存储
+
+- **口令不再明文落盘**：profile 口令迁入可插拔系统密钥库（`env` → `keyring` → `dpapi` → `pass` → `file`），`config.json` 仅保留非密字段
+- **WSL2**：经 `powershell.exe` interop 使用 Windows DPAPI，口令只走 stdin、不进命令行参数
+- 首次运行**自动单向迁移**旧明文配置，提示轮换 SAP 口令；迁移幂等、不生成备份文件
+- **新增命令**：`credentials set|forget|status|doctor`；新增全局选项 `--keystore`、`-v/--verbose`
+- **泄露加固**：凭据/配置对象 repr 掩码、日志脱敏过滤器、HTTP 异常净化（traceback 不含 Authorization 头）、进程内解密缓存
+- 拒绝把 `keyrings.alt` 明文后端（含 PlaintextKeyring）与 chainer 作为可用后端
+
+### v1.2.0 — 多环境 Profile 支持
+
+- **一份配置管理多套 SAP 环境**：`~/.sap-adt-cli/config.json` 现支持命名 profile（`dev`、`qas`、`prd` 等）；旧的单连接配置会自动迁移为 `default` profile
+- **新增命令**：`configure --profile NAME`、`profile list`、`profile use NAME`（粘性切换）、`profile remove NAME`
+- **单次环境覆盖**：全局参数 `--profile NAME`（放在命令名之前）或 `SAP_PROFILE` 环境变量；选择优先级为 `--profile` > `SAP_PROFILE` > 当前 active profile
+- **能力开关改为全局**：`allow_write` / `allow_transport` 对所有 profile 生效——执行写操作前请先用 `status` 确认当前环境
+- **向导体验**：会询问 profile 名称；编辑已有 profile 时密码留空即保留原密码
+- `.env` / `SAP_*` 环境变量仍作为单环境覆盖层，优先级高于所有 profile
 
 ### v1.1.1 — `run-sql` 兼容性与解析修复
 

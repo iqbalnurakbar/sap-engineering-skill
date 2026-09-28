@@ -3,18 +3,52 @@
 SAP ABAP Development Tools (ADT) exposes a REST API under `/sap/bc/adt/`.
 Authentication is HTTP Basic Auth with the `X-SAP-Client` header for client selection.
 
+## Write-side rule: 2xx means "accepted", never "completed"
+
+> ADT write-side endpoints generally confirm only that the **request was
+> accepted**. An HTTP 2xx response is never, by itself, evidence that the
+> operation finished — an independent readback is required. Three measured
+> cases (S/4HANA 2021 / Basis 7.56):
+>
+> 1. **release** — `newreleasejobs` 200/2xx must be followed by `tm:status`
+>    readback (D vs R);
+> 2. **activate** — POST 200 with an empty body must be followed by checking
+>    `/activation/inactiveobjects` / `adtcore:version="active"`; a 200 with
+>    failure messages in the body means the activation failed;
+> 3. **unlock** — `?_action=UNLOCK` returns **200 with an empty body even when
+>    it released nothing** (silent no-op from a foreign stateful context);
+>    only a subsequent independent `_action=LOCK` (200 vs 403) proves the
+>    enqueue is gone. The object resource's `program:lockedByEditor="false"`
+>    is per-session state, NOT proof that SM12 is empty.
+
+**Read-side counterpart: an empty result is not evidence of absence.**
+A list endpoint returning an empty collection must not be read as "nothing
+exists". Known case: the root `GET /cts/transportrequests` tree behind
+`list-transports` can return an empty tree while the user owns a modifiable
+D request (measured 2026-09-17; per-TR GET confirms it). Do not branch
+on emptiness without a positive check; the trigger condition is unprobed.
+Background: project notes on the open trigger investigation live in
+`../docs/known-issues.md` ("empty root tree") — not required to act on
+this rule.
+
 ## Authentication
 
 Every request requires:
 
-```
+```text
 Authorization: Basic base64(username:password)
 X-SAP-Client: <client_number>
+?sap-client=<client_number>        (URL parameter, on every request)
 ```
+
+The CLI sends the client both ways. Some setups (Web Dispatcher, ICF
+configuration) honor only the URL parameter; sending only the header then
+fails with HTTP 403 `SADT_RESOURCE 003` and no AUTHORITY-CHECK trace on the
+backend.
 
 For POST/PUT requests, first fetch a CSRF token:
 
-```
+```text
 GET <any ADT URL>
 x-csrf-token: fetch
 → Response header: x-csrf-token: <token>
@@ -22,6 +56,31 @@ x-csrf-token: fetch
 Then include in POST/PUT:
 x-csrf-token: <token>
 ```
+
+## Verified protocol facts — S/4HANA 2021 / SAP_BASIS 7.56
+
+The endpoint descriptions below reflect older documentation. Verified on a
+real DEV system (old value → new value; fixtures under `tests/fixtures/`):
+
+| # | Area | Old (fails on 7.56) | New (verified) | Date |
+|---|------|--------------------|-----------------|------|
+| 1 | Domain metadata | GET `/ddic/domains/{n}/source/main` → 404, silently fell back to data element | GET `/ddic/domains/{n}` (`vnd.sap.adt.domains.v2+xml`); fall back to data element only on genuine 404; output carries `resolved_as` | 2026-09-15 |
+| 2 | Syntax check | POST `/abapsource/syntaxcheck` → 404 | POST `/checkruns`, body root `chk:checkObjectList` with inner `chk:reporter chk:name="abapCheckRun"`, CT `…checkobjects+xml`, Accept `…checkmessages+xml`; findings at `chk:checkMessage@type/shortText`, line from `uri #start=L,C` | 2026-09-15 |
+| 3 | Transports | GET `/cts/transports` Accept `…transport.worklist+xml` → 406 | GET `/cts/transportrequests`, Accept `vnd.sap.adt.transportorganizertree.v1+xml`. **An empty `tm:root` is not proof of "no requests"** — it was also returned while the user owned a modifiable D request (2026-09-17); per-TR GET is the positive check, see the read-side rule above | 2026-09-15 |
+| 4 | Data preview (run-sql) | GET `freestyle?sqlCommand=…` → 405 | POST `freestyle?rowNumber=N`, `Content-Type: text/plain; charset=utf-8`, raw SQL body. **Accept must be `vnd.sap.adt.datapreview.table.v1+xml` — `application/xml` returns 406.** GET kept only as a 405 fallback. The `rowNumber` parameter is the hard row cap and overrides an SQL `UP TO N ROWS` clause (verified 2026-09-16) | 2026-09-16 |
+| 5 | Where-used | GET `/informationsystem/whereused?uri=<full URL>` → 405 | POST `/informationsystem/usageReferences?uri=<RELATIVE lower-case object URI>`; CT and Accept both `application/*`; body `usageReferenceRequest` with empty `<affectedObjects/>`; response `…usagereferences.result.v1+xml` (`referencedObject/adtObject`, optional `#start=` fragment). Discovery declares no `app:accept` for this collection, so `application/*` is the only workable value today — re-probe after a Basis upgrade before narrowing | 2026-09-16 |
+| 6 | Package contents | Parser qualified elements as `{http://www.sap.com/abapxml}…` → always `[]` on 7.56 | Response declares the namespace only on the `asx:` prefix; payload elements (`SEU_ADT_REPOSITORY_OBJ_NODE/OBJECT_*`) have **no** namespace — match by local name | 2026-09-15 |
+| 7 | Transport release | Legacy `POST /cts/transports/{TR}?action=release` (no readback) | `POST /cts/transportrequests/{TR}/newreleasejobs` (Accept `application/*`) **+ readback** `GET /cts/transportrequests/{TR}` (`tm:status` D/R); 2xx is not completion | 2026-09-16 |
+| 8 | Lock (enqueue) | `POST {object}?method=lock` with only `X-sap-adt-sessiontype: stateful` → **400** `contentTypeMissing`; adding `Content-Type: application/xml` → **415** (only `…programs.programs.v2+xml` accepted); vendor type + XML body → **400** `Enter a title` (treated as create) | `POST {object}?_action=LOCK&accessMode=MODIFY`, stateful header, `Accept: application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result`, **no body**; 200 ASX with handle at `asx:values/DATA/LOCK_HANDLE` | 2026-09-16 |
+| 9 | Source PUT | Handle in `X-sap-adt-lock-handle` **header**; chosen transport as `?sap-cts-request=` (this shape never worked live) | `PUT {object}/source/main?lockHandle=<handle>` plus, for a chosen request, `&corrNr=<TRKORR>`; `Content-Type: text/plain; charset=utf-8`; 200 empty | 2026-09-16 |
+| 10 | Unlock (dequeue) | `POST {object}?method=unlock` with the handle header (never worked live) | `POST {object}?_action=UNLOCK&lockHandle=<urlencoded handle>`. **200 empty is not proof of release** (see write-side rule): cross-process without the original stateful cookie = silent no-op (next LOCK still 403); measured real only inside the owning stateful session (same-process `finally` path confirmed by an independent fresh-process re-lock 200) or cross-process replaying the original cookie jar | 2026-09-16/17 |
+| 11 | Activation | Bare `POST /activation` (no parameters) → **400** `ExceptionParameterNotFound` "Parameter method could not be found" | `POST /sap/bc/adt/activation?method=activate&preauditRequested=true` with the same `objectReferences` body; success verified by readback (`/activation/inactiveobjects`, `adtcore:version`), not by 200 alone | 2026-09-16 |
+| 12 | Create transport | `POST /cts/transports` with CT `application/vnd.sap.cts.transport.request+xml` and a `<cts:transportRequest><cts:attributes>` (category/owner/description/target) body → **400** `ExceptionDataTypeNotFound` "No data type found in content type …" | `POST /cts/transports`, CT `application/vnd.sap.as+xml; charset=UTF-8; dataname=com.sap.adt.CreateCorrectionRequest`, Accept `text/plain`, ASX body `DATA{DEVCLASS,REQUEST_TEXT,REF,OPERATION=I}`; 200 body `/com.sap.cts/object_record/<TRKORR>`; read back `GET /cts/transportrequests/<TRKORR>` (`tm:status` D). CLI fixed 2026-09-17 (`create-transport --package/--description/--ref`, all required; `--category` removed) | 2026-09-17 |
+
+Also verified: `/ddic/tables/{n}/source/main` and
+`/ddic/structures/{n}/source/main` return CDS-style DDL
+(`define table/structure`) on 7.56, not field-metadata XML;
+`/ddic/tables/{n}/objectstructure` is 404 (field descriptions unavailable).
 
 ## Source Code Endpoints (Read)
 
@@ -37,61 +96,112 @@ x-csrf-token: <token>
 | Type Group | GET | `/sap/bc/adt/typegroups/groups/{name}/source/main` |
 | DDIC Table | GET | `/sap/bc/adt/ddic/tables/{name}/source/main` |
 | DDIC Structure | GET | `/sap/bc/adt/ddic/structures/{name}/source/main` |
-| Domain | GET | `/sap/bc/adt/ddic/domains/{name}/source/main` |
+| Domain | GET | `/sap/bc/adt/ddic/domains/{name}` (legacy `…/source/main` → 404 on 7.56) |
 | Data Element | GET | `/sap/bc/adt/ddic/dataelements/{name}` |
 
 Object names must be URL-encoded. Responses are plain text (ABAP source) or XML.
 
-## Write Source — Lock / PUT / Unlock
+## Write Source — Lock / PUT / Unlock (verified 2026-09-16, Basis 7.56)
 
-Three-step flow; unlock must always run (use `finally`).
+Stateful three-step flow inside ONE stateful session; unlock must always run
+(use `finally`). The stateful context is selected by
+`X-sap-adt-sessiontype: stateful`; the cookies set by the server then
+accompany every request of the session. Observed under HTTP Basic auth on
+the capture system: `SAP_SESSIONID_ECD_400`, `sap-contextid`,
+`sap-usercontext` — **no `MYSAPSSO2`**.
 
 ### 1. Lock
 
-```
-POST /sap/bc/adt/{object_uri}?method=lock
+```http
+POST /sap/bc/adt/{object_uri}?_action=LOCK&accessMode=MODIFY
 X-sap-adt-sessiontype: stateful
-→ Response header: com.sap.adt.lock.handle: <handle>
+Accept: application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result
 ```
 
-If the header is absent, fall back to parsing `<handle>` or `<lockHandle>` from the XML response body.
+No request body. Response 200 is ABAP-serialized XML; the lock handle is the
+text of `asx:abap/asx:values/DATA/LOCK_HANDLE` (sibling fields `CORRNR`,
+`CORRUSER`, `CORRTEXT`, `IS_LOCAL`, `SCOPE_MESSAGES`). An existing enqueue
+comes back as **403 `ExceptionResourceNoAccess`** "User … is currently
+editing …".
 
 ### 2. Write (PUT)
 
-```
-PUT /sap/bc/adt/{object_uri}/source/main
+```http
+PUT /sap/bc/adt/{object_uri}/source/main?lockHandle=<handle>
 Content-Type: text/plain; charset=utf-8
-X-sap-adt-lock-handle: <handle>
+X-sap-adt-sessiontype: stateful
 
-[optional] ?sap-cts-request=<TRKORR>    ← assign to specific transport
+# optional transport assignment: append &corrNr=<TRKORR>
 ```
 
-Body: plain text ABAP source.
+Body: plain text ABAP source. 200 with empty body. The handle goes in the
+**query string**, not a header.
 
 ### 3. Unlock
 
-```
-POST /sap/bc/adt/{object_uri}?method=unlock
-X-sap-adt-lock-handle: <handle>
+```http
+POST /sap/bc/adt/{object_uri}?_action=UNLOCK&lockHandle=<urlencoded handle>
+X-sap-adt-sessiontype: stateful
 ```
 
-## Activation
+200 with empty body. Per the write-side rule, the 200 alone proves nothing;
+release was confirmed by an independent `_action=LOCK` in a fresh process
+returning 200 (measured 2026-09-17).
 
-```
-POST /sap/bc/adt/activation
+### Cross-process / crash semantics (measured 2026-09-16)
+
+- Lock and unlock belong to the **stateful server context** identified by the
+  session cookie. An `_action=UNLOCK` from a different process **without**
+  the original cookie jar returns 200 empty but is a **silent no-op** — the
+  next LOCK still gets 403.
+- A different process replaying the **original cookie jar + handle** does
+  release the enqueue (verified by a crash-lock → cookie-restore → unlock →
+  fresh LOCK 200 cycle).
+- An orphaned enqueue whose owning process died also disappears when the
+  server stateful context times out (the SM12 entry was gone the next
+  morning). There is no cheap synchronous "is it locked" probe:
+  `lockedByEditor="false"` on the object resource is per-session state.
+
+### Legacy forms (rejected by 7.56 — do not reintroduce)
+
+- `POST {object}?method=lock` + only the stateful header → 400
+  `contentTypeMissing`; with `application/xml` → 415.
+- `X-sap-adt-lock-handle: <handle>` request header and `?sap-cts-request=`
+  transport parameter — not honored on 7.56 (use `?lockHandle=` / `?corrNr=`).
+- `POST {object}?method=unlock` with the handle header.
+
+## Activation (verified 2026-09-16, Basis 7.56)
+
+```xml
+POST /sap/bc/adt/activation?method=activate&preauditRequested=true
 Content-Type: application/vnd.sap.adt.activation.request+xml; charset=utf-8
 
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">
   <adtcore:objectReference adtcore:uri="{object_uri}" adtcore:name="{OBJECT_NAME}"/>
 </adtcore:objectReferences>
 ```
 
-Response: empty (200) = success. Non-empty XML body = activation errors — parse `severity`, `text` attributes.
+The `?method=activate` parameter is mandatory — a bare POST returns 400
+`ExceptionParameterNotFound`. GET on the same URL returns 405 (but still
+serves as a CSRF-token fetch). Activation needs **no lock handle and no
+shared stateful session**: it succeeds from a separate process after
+write-source has unlocked (measured lock→write→unlock in process A, activate
+in process B).
 
-## Syntax Check
+200 with an empty body = accepted and (for an empty object) activated;
+**read back to confirm**: `GET /sap/bc/adt/activation/inactiveobjects`
+(Accept `application/vnd.sap.adt.inactivectsobjects.v1+xml`) must not list
+the object, and the object resource must carry
+`adtcore:version="active"` (inactive → `"inactive"`). Non-empty failure
+bodies use `chkl:messages/msg` (`type` E/A/X) and `ioc:inactiveObjects` per
+the reference implementation. (The older `error/message/checkResult` shape
+is what the current parser looks for; a real failed activation fixture is
+still needed — background: `../docs/known-issues.md`.)
 
-```
+## Syntax Check (legacy — see verified facts #2)
+
+```http
 POST /sap/bc/adt/abapsource/syntaxcheck
 Content-Type: application/vnd.sap.adt.abapsource.syntaxcheckresult+xml; charset=utf-8
 
@@ -103,9 +213,9 @@ Content-Type: application/vnd.sap.adt.abapsource.syntaxcheckresult+xml; charset=
 
 Response: XML with `severity` (`error`/`warning`/`info`), `text`, and `line` attributes. Empty body = no issues.
 
-## Where-Used
+## Where-Used (legacy — see verified facts #5)
 
-```
+```http
 GET /sap/bc/adt/repository/informationsystem/whereused
     ?uri=<full_object_url>        ← full URL including scheme+host
     &maxResults=50
@@ -114,9 +224,9 @@ Accept: application/vnd.sap.adt.repository.informationsystem.whereused+xml
 
 Response: XML with `adtcore:objectReference` elements (namespace `http://www.sap.com/adt/core`), attributes: `adtcore:name`, `adtcore:type`, `adtcore:uri`.
 
-## Open SQL Data Preview
+## Open SQL Data Preview (legacy GET — see verified facts #4)
 
-```
+```xml
 GET /sap/bc/adt/datapreview/freestyle
     ?rowNumber=<max_rows>
     &sqlCommand=<url-encoded-SELECT>
@@ -129,7 +239,7 @@ Only `SELECT` is valid. DML (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `MODIFY`, `T
 
 ## Search
 
-```
+```http
 GET /sap/bc/adt/repository/informationsystem/search
     ?operation=quickSearch
     &query=<url-encoded-query>      ← supports * wildcard
@@ -140,7 +250,7 @@ Response: XML with matching objects.
 
 ## Package Contents
 
-```
+```http
 POST /sap/bc/adt/repository/nodestructure
      ?parent_type=DEVC/K
      &parent_name=<url-encoded-package>
@@ -148,6 +258,7 @@ POST /sap/bc/adt/repository/nodestructure
 ```
 
 Response: XML. Relevant nodes:
+
 ```xml
 <SEU_ADT_REPOSITORY_OBJ_NODE>
   <OBJECT_TYPE>PROG</OBJECT_TYPE>
@@ -159,7 +270,7 @@ Response: XML. Relevant nodes:
 
 ## Transaction Properties
 
-```
+```http
 GET /sap/bc/adt/repository/informationsystem/objectproperties/values
     ?uri=%2Fsap%2Fbc%2Fadt%2Fvit%2Fwb%2Fobject_type%2Ftrant%2Fobject_name%2F{tx_name}
     &facet=package
@@ -168,9 +279,115 @@ GET /sap/bc/adt/repository/informationsystem/objectproperties/values
 
 ## Transport Requests
 
-**The CTS endpoints are NOT the same on every backend.** ADT registers them in
-`CL_CTS_ADT_RES_APP->register_resources`, which branches on whether the call
-arrives over HTTP:
+### List transports (legacy — see verified facts #3)
+
+```xml
+GET /sap/bc/adt/cts/transports
+    ?user=<username>
+    &target=
+    &category=Workbench
+Accept: application/vnd.sap.cts.transport.worklist+xml; charset=utf-8
+```
+
+Response: XML with transport work items. Parse `TRKORR`, `AS4TEXT` (description), `TRSTATUS` (`D`=open, `R`=released), `AS4USER` (owner).
+
+### Create transport (verified 2026-09-17, Basis 7.56)
+
+Creation is an ABAP-serialized function call — `CreateCorrectionRequest`
+— not a CTS resource document:
+
+```http
+POST /sap/bc/adt/cts/transports
+Accept: text/plain
+Content-Type: application/vnd.sap.as+xml; charset=UTF-8;
+              dataname=com.sap.adt.CreateCorrectionRequest
+
+<?xml version="1.0" encoding="UTF-8"?>
+<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">
+  <asx:values><DATA>
+    <DEVCLASS>$TMP</DEVCLASS>
+    <REQUEST_TEXT>ADT-CLI PROBE 20260917</REQUEST_TEXT>
+    <REF>/sap/bc/adt/programs/programs/z_adt_session_probe/source/main</REF>
+    <OPERATION>I</OPERATION>
+  </DATA></asx:values>
+</asx:abap>
+```
+
+200 with `text/plain` body `/com.sap.cts/object_record/<TRKORR>` (no
+`Location` header). Parameters measured only for this combination:
+
+- `DEVCLASS` — package; `$TMP` produces a **local** request
+  (`tm:target=""`, `target_desc="Local Change Requests"`, not releasable);
+- `REF` — object URI the request is created for (the reference
+  implementation validates it as an object URL); whether it is truly
+  mandatory and how real packages behave vs. `$TMP` is NOT probed;
+- `OPERATION` — `I` measured; other values unknown.
+
+Per the write-side rule, read the new request back:
+`GET /cts/transportrequests/<TRKORR>` with
+`application/vnd.sap.adt.transportorganizer.v1+xml` gives `tm:status` D
+("Modifiable"), owner and description. Note: a root
+`GET /cts/transportrequests` tree returned empty on the capture system
+even while the user owned a modifiable request — direct per-TR readback is
+the reliable verification.
+
+### Create transport (legacy — rejected by 7.56; the CLI used this until 2026-09-17)
+
+```http
+POST /sap/bc/adt/cts/transports
+Content-Type: application/vnd.sap.cts.transport.request+xml; charset=utf-8
+
+<cts:transportRequest xmlns:cts="http://www.sap.com/cts">
+  <cts:attributes>
+    <cts:attribute name="category"    value="Workbench"/>
+    <cts:attribute name="owner"       value="{username}"/>
+    <cts:attribute name="description" value="{description}"/>
+    <cts:attribute name="target"      value=""/>
+  </cts:attributes>
+</cts:transportRequest>
+```
+
+→ 400 `ExceptionDataTypeNotFound` "No data type found in content type …"
+(fixture `tests/fixtures/transport.create.400-old-shape.xml`). This was the
+CLI shape until 2026-09-17; `create-transport` now uses the verified
+CreateCorrectionRequest form above (`--package`/`--ref` required,
+`--category` removed). The fixed CLI's request body was verified
+byte-identical to the live 200 probe; an end-to-end second creation was
+not run to avoid a second probe request.
+
+### Release transport (modern)
+
+```http
+POST /sap/bc/adt/cts/transportrequests/{TRKORR}/newreleasejobs
+Accept: application/*
+```
+
+Response `tm:root/tm:releasereports/chkrun:checkReport` with
+`chkrun:status="released"` or `"abortrelapifail"` (pre-release check failed).
+Readback: `GET /cts/transportrequests/{TRKORR}`
+(`vnd.sap.adt.transportorganizer.v1+xml`, `tm:request@tm:status`, D/R);
+CLI polls 2s/120s and emits `RELEASE_UNVERIFIED` (unknown final state — do
+not re-release, verify in SE09/SE10) or `RELEASE_REJECTED` (still D).
+
+### Release transport (legacy)
+
+```http
+POST /sap/bc/adt/cts/transports/{TRKORR}?action=release
+```
+
+Response: 200 = released. Irreversible.
+
+## ECC (NetWeaver) differences
+
+Everything above was verified on S/4HANA. The notes below come from an
+ECC 6.0 backend, which is why each profile stores `platform` (`s4` / `ecc`)
+and the transport commands refuse to run until it is set — **ask the user,
+never infer it**.
+
+### Why the transport endpoints differ
+
+ADT registers the CTS resources in `CL_CTS_ADT_RES_APP->register_resources`,
+which branches on whether the call arrives over HTTP:
 
 ```abap
 if ( me->http_call = abap_true ).     " base path /sap/bc/adt
@@ -182,26 +399,20 @@ endif.
     register /transportrequests ...
 ```
 
-On newer releases (S/4HANA) the transport organizer is served under
-`/sap/bc/adt/cts/transportrequests`. On ECC it is not registered over HTTP at
-all. The CLI therefore requires `platform` (`s4` / `ecc`) to be configured, and
-the skill must **ask the user** which it is rather than infer it.
-
-Telling the two 404s apart:
+So on ECC `/sap/bc/adt/cts/transportrequests` (tree, single-request
+readback, `newreleasejobs`) does not exist. Telling the two 404s apart:
 
 | Body | Content-Type | Meaning |
 |---|---|---|
 | `No suitable resource found` | `text/plain` | ICF routing is fine; that URI is not registered for this release |
 | `Service cannot be reached` (HTML page) | `text/html` | The ICF node itself is missing or unpublished |
 
-### List transports — S/4HANA
-
-```http
-GET /sap/bc/adt/cts/transportrequests?user=<USER>&requestStatus=<D|R>
-```
-
-`requestStatus` must be sent server-side; otherwise only the released worklist
-comes back.
+Also confirmed absent on ECC 6.0 (all 404 `No suitable resource found`):
+`datapreview` (so `run-sql` is unavailable), `checkruns` (so `syntax-check`
+is unavailable), `cts/transportrequests` and the release endpoint. Reads,
+search, `create-program`, `write-source`, `activate`, `where-used`,
+`transportchecks` and the ECC transport create/list paths work. Probe rather
+than assume.
 
 ### List transports — ECC
 
@@ -210,40 +421,15 @@ GET /sap/bc/adt/cts/transports?_action=FIND&user=<USER>&trfunction=K
 ```
 
 Handled by `CL_CTS_ADT_RES_OBJ_RECORD->find`, which calls
-`CTS_WBO_API_READ_REQUESTS`. Response is `asx:abap` with one `CTS_REQ_HEADER`
-element per request (`TRKORR`, `TRFUNCTION`, `TRSTATUS`, `TARSYSTEM`,
-`AS4USER`, `AS4DATE`, `AS4TIME`, `AS4TEXT`, `CLIENT`). There is no server-side
-status filter, so filter the parsed rows. It generally returns only modifiable
-requests, so `--status R` is usually empty.
-
-### Create transport — S/4HANA
-
-```http
-POST /sap/bc/adt/cts/transportrequests
-Content-Type: application/vnd.sap.adt.transportorganizer.v1+xml
-```
-
-```xml
-<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm" tm:useraction="newrequest">
-  <tm:request tm:desc="<DESCRIPTION>" tm:type="K" tm:target="<TARGET>" tm:cts_project="">
-    <tm:task tm:owner="<USER>"/>
-  </tm:request>
-</tm:root>
-```
-
-`tm:type` is `K` for Workbench, `W` for Customizing. The target system is chosen
-by the user — never defaulted, even when the value help offers one candidate:
-
-```http
-GET /sap/bc/adt/cts/transportrequests/valuehelp/target?maxItemCount=50
-```
+`CTS_WBO_API_READ_REQUESTS`. The response is `asx:abap` with one
+`CTS_REQ_HEADER` element per request (`TRKORR`, `TRFUNCTION`, `TRSTATUS`,
+`TARSYSTEM`, `AS4USER`, `AS4DATE`, `AS4TIME`, `AS4TEXT`, `CLIENT`). There is
+no server-side status filter, so the CLI filters the parsed rows; it
+generally returns only modifiable requests, so `--status R` is usually empty.
 
 ### Create transport — ECC
 
-```http
-POST /sap/bc/adt/cts/transports
-Content-Type: application/vnd.sap.as+xml; charset=UTF-8; dataname=com.sap.adt.CreateCorrectionRequest
-```
+Same resource and content type as S/4HANA, but only two fields:
 
 ```xml
 <asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0"><asx:values><DATA>
@@ -252,19 +438,24 @@ Content-Type: application/vnd.sap.as+xml; charset=UTF-8; dataname=com.sap.adt.Cr
 </DATA></asx:values></asx:abap>
 ```
 
-Handled by `CL_CTS_ADT_RES_OBJ_RECORD->post` (`CO_RESOURCE_ID = 'TransportRequest'`),
-which reads a `SADT_CREATE_CORR_REQUEST` and calls
-`TR_INSERT_REQUEST_WITH_TASKS`, then `TR_INSERT_NEW_COMM` for the task.
-Consequences:
+`CL_CTS_ADT_RES_OBJ_RECORD->post` reads a `SADT_CREATE_CORR_REQUEST` and
+calls `TR_INSERT_REQUEST_WITH_TASKS`, then `TR_INSERT_NEW_COMM` for the task:
 
+- **No `REF`** is sent, so `--ref` is not needed on ECC.
 - **The target is not passed.** The backend derives it from the package via
-  `TR_DEVCLASS_GET` then `TR_GET_TRANSPORT_TARGET`, falling back to `LOCAL`.
-  So the package is mandatory and `--target` is meaningless.
+  `TR_DEVCLASS_GET` then `TR_GET_TRANSPORT_TARGET`, falling back to `LOCAL`,
+  so the package is mandatory.
 - **The type is hardcoded to `K`** (Workbench); Customizing is not selectable.
-- **The response is `text/plain`** — a URI whose last segment is the `TRKORR`,
-  not XML and not a `Location` header.
+- The response is `text/plain`: a URI whose last segment is the `TRKORR`.
 - An empty or unknown `DEVCLASS` fails in `TR_DEVCLASS_GET` and surfaces as
   HTTP 500 `Resource   could not be successfully created.`
+
+### Release transport — not available on ECC
+
+The `/transports/{requestnumber}` URI template is registered only on the
+non-HTTP branch, whose base path `/sap/bc/cts` has no ICF node, so no HTTP
+URL reaches the release handler. `release-transport` refuses on ECC;
+release in SE01/SE09 instead.
 
 ### Which transports may an object go into (both platforms)
 
@@ -281,20 +472,56 @@ Content-Type: application/vnd.sap.as+xml; charset=UTF-8; dataname=com.sap.adt.tr
 </DATA></asx:values></asx:abap>
 ```
 
-Read-only. Returns the package text, `KORRFLAG` (transportable), `RESULT` (`S` =
-the object may be created there), `EXISTING_REQ_ONLY`, and a `REQUESTS` list of
-candidate requests. Useful for validating a package and offering the user real
-choices before any write.
+Read-only. Returns the package text, `KORRFLAG` (transportable), `RESULT`
+(`S` = the object may be created there), `EXISTING_REQ_ONLY`, and a
+`REQUESTS` list of candidate requests. Useful for validating a package and
+offering the user real choices before any write.
 
-### Release transport
+### Lock / unlock without a body
+
+ECC rejects a bodyless POST that carries no `Content-Type` with HTTP 400
+`contentTypeMissing`; S/4HANA 2021 accepts it. `_action=LOCK` and
+`_action=UNLOCK` are therefore sent as verified on S/4HANA first and, on
+exactly that 400, repeated once with
+`Content-Type: application/vnd.sap.as+xml; charset=UTF-8`. The 400 means the
+request never ran, so no lock was taken by the first attempt.
+
+## Create program (both platforms)
 
 ```http
-POST /sap/bc/adt/cts/transports/{TRKORR}?action=release
+POST /sap/bc/adt/programs/programs?corrNr=<TRKORR>
+Content-Type: application/vnd.sap.adt.programs.programs.v2+xml; charset=UTF-8
+
+<program:abapProgram xmlns:program="http://www.sap.com/adt/programs/programs"
+    xmlns:adtcore="http://www.sap.com/adt/core"
+    adtcore:name="ZNAME" adtcore:type="PROG/P" adtcore:description="<TITLE>"
+    program:programType="executableProgram">
+  <adtcore:packageRef adtcore:name="<PACKAGE>"/>
+</program:abapProgram>
 ```
 
-**S/4HANA only.** On ECC the `/transports/{requestnumber}` URI template is
-registered only on the non-HTTP branch, whose base path `/sap/bc/cts` has no ICF
-node — so no HTTP URL reaches the release handler. Release in SE01/SE09 instead.
+The collection accepts `…programs.programs.v2+xml` (from
+`/sap/bc/adt/discovery`). `corrNr` carries the transport; a `$TMP` package
+needs none. On ECC the new shell already contains a header comment block and
+`REPORT <name>.`, so it activates as-is; elsewhere the source may be empty and
+need `write-source` first — check with `get-program` before assuming.
+
+### Program logical database attribute
+
+The logical database lives in the program's metadata document, not in its
+source:
+
+```xml
+<program:logicalDatabase>
+  <program:ref adtcore:name="D$S"/>
+</program:logicalDatabase>
+```
+
+SAP can derive one from `TABLES` declarations (a report declaring `TABLES`
+for SD tables picks up the dummy LDB `D$S`, visible as `TRDIR-LDBNAME`).
+`set-program-ldb` rewrites the block: `GET /programs/programs/<name>`
+(`Accept: …programs.programs.v2+xml`) → lock → `PUT` the document with
+`?lockHandle=` and optional `&corrNr=` → unlock in `finally`.
 
 ## SICF Service Activation
 
@@ -311,8 +538,10 @@ Activate in transaction `SICF` before use:
 |------|---------|
 | 200 | Success |
 | 401 | Wrong credentials |
-| 403 | Missing authorization OR expired CSRF token |
+| 403 | Missing authorization; expired CSRF token (body mentions `csrf`); **or object already enqueued** (`ExceptionResourceNoAccess` "is currently editing") on `_action=LOCK` |
 | 404 | Object not found |
+| 405 | Method not supported (e.g. GET on `/activation`) — response headers can still carry a fresh CSRF token |
+| 415 | Unsupported media type — the error body names the accepted vendor type (e.g. `…programs.programs.v2+xml`) |
 | 503 | ADT service not activated in SICF |
 
 ## Required Authorizations
@@ -321,5 +550,6 @@ Activate in transaction `SICF` before use:
 |---|---|
 | All read operations | `S_ADT_RES`, `S_RFC` (ADT function groups) — or role `SAP_ADT_BASE` |
 | `write-source`, `activate` | `S_DEVELOP` with `ACTVT=02` on relevant object types |
+| `create-program`, `set-program-ldb` | `S_DEVELOP` on `PROG` with `ACTVT=01` (create) / `ACTVT=02` (change) |
 | `create-transport`, `release-transport` | `S_CTS_ADMI` or equivalent transport authorization |
 | `list-transports` | Covered by `SAP_ADT_BASE` — no additional flag needed |

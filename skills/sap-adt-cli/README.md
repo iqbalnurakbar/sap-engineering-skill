@@ -18,7 +18,10 @@ explicit capability flags and per-operation confirmation.
 - A SAP system (on-premise ECC / S/4HANA, or BTP ABAP) with ADT services activated
 - A SAP dialog user with the `SAP_ADT_BASE` role (or equivalent)
 
-Dependencies (`click`, `requests`, `urllib3`) are installed automatically on first run.
+Core dependencies (`click`, `requests`, `urllib3`) are installed automatically on first run.
+Keystore backends are optional: `pip install keyring` for desktop OS vaults,
+`pip install cryptography` for the encrypted-file fallback (WSL2 needs neither —
+it uses Windows DPAPI directly). See [Credential storage](#credential-storage-keystore).
 
 ---
 
@@ -97,8 +100,12 @@ SAP Client        — 3-digit client number (e.g. 100)
 Skip SSL check?   — yes for self-signed / internal certs
 ```
 
-Credentials can be loaded from process environment variables, a SKILL-local `.env`,
-or `~\.sap-adt-cli\config.json` and reused in subsequent sessions.
+Connection details are stored per environment profile in
+`~/.sap-adt-cli/config.json` (non-secret fields only), while **passwords are
+stored in the operating system keystore** — never as plain text. Multiple SAP
+systems (DEV/QAS/PRD) are supported as named profiles — see
+[Credential storage](#credential-storage-keystore) and
+[Multiple SAP environments](#multiple-sap-environments-profiles).
 
 ### Compatible AI agents
 
@@ -125,7 +132,8 @@ and integrates with any agent framework that supports custom tools or skills:
 git clone https://github.com/shrek-abaper/sap-engineering-skill
 cd sap-engineering-skill
 
-# 2. Configure credentials (interactive wizard — password is not echoed)
+# 2. Configure credentials (interactive wizard — password is not echoed and is
+#    saved to the OS keystore; add more systems later with: configure --profile qas / prd)
 python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
 
 # 3. Verify the connection
@@ -145,7 +153,46 @@ Credential lookup order is:
 
 1. Process environment variables
 2. `skills/sap-adt-cli/.env`
-3. `~/.sap-adt-cli/config.json`
+3. The selected profile in `~/.sap-adt-cli/config.json` (non-secret fields)
+   and its password in the OS keystore — see [Credential storage](#credential-storage-keystore)
+
+### Multiple SAP environments (profiles)
+
+Each SAP system is stored as a named profile in `~/.sap-adt-cli/config.json`
+(non-secret fields; the password goes to the keystore). The first `configure`
+run creates a profile called `default`; an old single-connection config is
+migrated automatically:
+
+```bash
+CLI="python3 skills/sap-adt-cli/scripts/sap_adt_cli.py"
+
+# Add environments (each saved profile becomes the active one)
+$CLI configure --profile dev --url "https://sap-dev:8000" --username DEV --client 100
+$CLI credentials set dev                       # then store the password (hidden prompt)
+SAP_PASSWORD="..." $CLI configure --profile prd --url "https://sap-prd:8000" --username PRD --client 200
+                                               # ^ SAP_PASSWORD is moved into the keystore, not left in config.json
+
+# List environments; * marks the active profile
+$CLI profile list
+
+# Persistent switch
+$CLI profile use dev
+
+# One-off override: global --profile (before the command) or SAP_PROFILE env var
+$CLI --profile prd get-program SAPMV45A
+SAP_PROFILE=qas $CLI status
+
+# Remove an environment (the active profile cannot be removed)
+$CLI profile remove qas
+```
+
+Profile selection order: `--profile` > `SAP_PROFILE` > the active profile set by
+`profile use`. Note the write/transport capability switches are **global** — they
+apply to every profile, including production.
+
+> A complete set of `SAP_URL/USERNAME/PASSWORD/CLIENT` environment variables (or a
+> SKILL-local `.env`) overrides all profiles. Run `status` to see which source is
+> actually used.
 
 ### SKILL-local `.env` (recommended for per-skill isolation)
 
@@ -163,39 +210,88 @@ Never commit the real `.env` file.
 python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
 ```
 
-Credentials are saved to `~/.sap-adt-cli/config.json` with `0600` permissions.
+Connection fields are saved as a profile (the wizard asks for a profile name) in
+`~/.sap-adt-cli/config.json` (`0600`); the password goes to the selected
+keystore. Re-running the wizard for an existing profile and leaving the
+password blank keeps the stored password.
 
-> **Security note:** The config file stores credentials in plain text.
-> Do not commit it to version control and restrict access to the file accordingly.
+### Credential storage (keystore)
+
+Passwords are stored **only** through pluggable keystore backends, selected by
+real capability probing rather than by operating system. Priority order:
+
+| # | Backend | Environment | Setup needed | One-time configuration |
+|---|---------|-------------|--------------|------------------------|
+| 1 | `env` | containers / CI / any | none | `export SAP_ADT_<PROFILE>_PASSWORD=...` (read-only) |
+| 2 | `keyring` | native Windows, macOS, Linux desktop | `pip install keyring` (Credential Manager / Keychain / Secret Service) | none |
+| 3 | `dpapi` | **WSL2** | none — uses Windows DPAPI via `powershell.exe` interop | none |
+| 4 | `pass` | headless Linux with GPG | [`pass`](https://www.passwordstore.org/) initialized (`pass init`) | none |
+| 5 | `file` | last-resort fallback, all platforms | `pip install cryptography` | a master passphrase (prompted, or `SAP_ADT_MASTER_PASSPHRASE`) |
+
+There is deliberately no `credentials export` command. Diagnose the active
+backend with:
+
+```bash
+python3 skills/sap-adt-cli/scripts/sap_adt_cli.py credentials doctor
+# force a specific backend (fail-closed: an unavailable choice errors out)
+python3 skills/sap-adt-cli/scripts/sap_adt_cli.py --keystore file credentials status
+```
+
+Manage stored passwords:
+
+```bash
+CLI="python3 skills/sap-adt-cli/scripts/sap_adt_cli.py"
+$CLI credentials set dev          # prompts with hidden input + confirmation
+$CLI credentials status           # configured / not configured per profile — never prints secrets
+$CLI credentials forget dev       # purge from all writable backends
+```
+
+> **Keystore-bound secrets are not portable.** DPAPI blobs are tied to the
+> Windows account and Keychain entries to the macOS login; copying
+> `secrets.json`/the config to another machine or user cannot decrypt them.
+> Re-running `credentials set` on the new machine is expected behavior, not a bug.
+>
+> **Migration from older versions:** a config that still contains plaintext
+> passwords is migrated automatically on first run — the passwords move into
+> the selected keystore, the fields are stripped from `config.json` (no backup
+> copy is created), and you are advised to change those passwords on the SAP
+> side because they previously sat on disk unencrypted.
 
 ### Environment variables
 
-Useful for CI/CD pipelines or one-off sessions. Environment variables take
-precedence over both the SKILL-local `.env` and the saved config file.
+Useful for CI/CD pipelines or one-off sessions. The complete-connection
+variables take precedence over both the SKILL-local `.env` and saved profiles.
 
 ```bash
 export SAP_URL=https://my-sap.example.com:8000
 export SAP_USERNAME=MYUSER
-export SAP_PASSWORD=secret          # prefer this over the --password flag
+export SAP_PASSWORD=secret          # complete-connection override; prefer over the --password flag
 export SAP_CLIENT=100
+export SAP_PROFILE=dev              # optional: select a profile (ignored when SAP_URL..SAP_CLIENT are all set)
 export SAP_LANGUAGE=EN              # optional, default: EN
 export SAP_VERIFY_SSL=0             # optional: set 0 for self-signed certificates
 export SAP_ALLOW_WRITE=0            # optional: set 1 to enable write-source/activate
 export SAP_ALLOW_TRANSPORT=0        # optional: set 1 to enable create/release transport
+
+# Per-profile password for the 'env' keystore (profile 'dev' -> variable SAP_ADT_DEV_PASSWORD)
+export SAP_ADT_DEV_PASSWORD=secret
+# Master passphrase for the 'file' keystore in non-interactive runs
+export SAP_ADT_MASTER_PASSPHRASE=...
 ```
 
 ### Capability flags (default: disabled)
 
 Two optional flags unlock write and transport capabilities.
-**Enable only on development systems.**
+**Enable only when needed — they are GLOBAL and apply to every profile, including
+production.** Check `status` (which shows the active profile and both switches)
+before write operations.
 
 ```bash
-# Enable interactively
-python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure
-# → answer 'y' to the write/transport prompts
+# Enable interactively (answer 'y' to the write/transport prompts)
+python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure --profile dev
 
 # Enable non-interactively
-SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure \
+SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure --profile dev \
   --url "https://sap-dev.example.com:44300" \
   --username "DEVELOPER" \
   --client "400" \
@@ -203,7 +299,7 @@ SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configur
   --no-allow-transport
 ```
 
-| Flag | Config field | Default | Commands unlocked |
+| Flag | Config field (global, all profiles) | Default | Commands unlocked |
 |------|-------------|---------|-------------------|
 | `--allow-write` | `allow_write` | false | `write-source`, `activate` |
 | `--allow-transport` | `allow_transport` | false | `create-transport`, `release-transport` |
@@ -216,12 +312,17 @@ after use and must be repeated for each subsequent operation.
 ### Non-interactive flags (agent / automation workflows)
 
 ```bash
-# Pass password via environment variable to avoid shell history exposure
-SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure \
+# Pass password via environment variable to avoid shell history exposure.
+# configure stores it in the keystore; it does not remain in config.json.
+SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configure --profile dev \
   --url      "https://my-sap.example.com:8000" \
   --username "MYUSER" \
   --client   "100"
 ```
+
+At runtime, CI can instead provide the password per profile via
+`SAP_ADT_<PROFILE>_PASSWORD` (read-only `env` backend), or use
+`--keystore file` together with `SAP_ADT_MASTER_PASSPHRASE`.
 
 ---
 
@@ -229,29 +330,39 @@ SAP_PASSWORD="secret" python3 skills/sap-adt-cli/scripts/sap_adt_cli.py configur
 
 | Command | Description |
 |---------|-------------|
-| `configure` | Save connection credentials |
-| `status` | Show current connection configuration |
+| `configure [--profile NAME]` | Save credentials for one environment profile (wizard or flags) |
+| `profile list` | List all configured environments (`*` = active) |
+| `profile use <NAME>` | Persistently switch the active environment |
+| `profile remove <NAME>` | Delete an environment (active profile is protected) and purge its password |
+| `credentials set <NAME>` | Store a profile password in the keystore (hidden prompt) |
+| `credentials forget <NAME>` | Purge a profile password from writable keystores |
+| `credentials status` | Show configured/not-configured per profile (never prints passwords) |
+| `credentials doctor` | Diagnose backends, selected backend, files and entries |
+| `status` | Show active profile and current connection configuration |
+| `--profile NAME <command>` | Global option: one-off profile override for a single command |
+| `--keystore <env\|keyring\|dpapi\|pass\|file> <command>` | Global option: force the credential backend (fail-closed if unavailable) |
+| `-v, --verbose` | Verbose logging (secrets are always redacted) |
 | `get-program <NAME>` | ABAP program / report source code |
 | `get-class <NAME>` | ABAP class source code |
 | `get-function-group <NAME>` | Function group top-include source code |
 | `get-function <NAME> --group <FG>` | Function module source code |
 | `get-include <NAME>` | ABAP include source code |
 | `get-interface <NAME>` | ABAP interface source code |
-| `get-table <NAME>` | DDIC table field definitions (XML) |
-| `get-structure <NAME>` | DDIC structure definition (XML) |
-| `get-type-info <NAME>` | Domain or data element info (XML) |
+| `get-table <NAME>` | DDIC table fields — `fields` envelope (DDL on S/4) |
+| `get-structure <NAME>` | DDIC structure fields — `fields` envelope |
+| `get-type-info <NAME>` | Domain/data element — `scalar` envelope (`resolved_as`) |
 | `get-type-group <NAME>` | ABAP type group (TYPE POOL) source |
 | `get-cds-view <NAME>` | CDS View DDL source code |
-| `get-package <NAME>` | Package object list (JSON) |
-| `get-transaction <NAME>` | Transaction properties / package (XML) |
+| `get-package <NAME>` | Package objects — `objects` envelope |
+| `get-transaction <NAME>` | Transaction properties — `scalar` envelope |
 | `search-object <QUERY> [--max-results N]` | Object name search — `*` wildcard supported |
 | `syntax-check <TYPE> <NAME> [--group <FG>]` | Syntax check — read-only, no confirmation; `--group` required when TYPE is `function` |
-| `where-used <TYPE> <NAME> [--max-results N] [--group <FG>]` | Where-used list (JSON); `--group` required when TYPE is `function` |
+| `where-used <TYPE> <NAME> [--max-results N] [--group <FG>]` | Where-used list — `objects` envelope; `--group` required when TYPE is `function` |
 | `run-sql "<SQL>" [--max-rows N]` | Open SQL SELECT → JSON *(DML statements blocked)*; default 100 rows, max 10 000 |
 | `write-source <TYPE> <NAME> --file <PATH> [--activate] [--group <FG>] [--transport <TRKORR>]` | Write source code *(allow_write + confirm each time)*; `--activate` activates after writing; `--group` required when TYPE is `function`; `--transport` pins the transport request |
 | `activate <TYPE> <NAME> [--group <FG>]` | Activate ABAP object *(allow_write + confirm each time)*; `--group` required when TYPE is `function` |
 | `list-transports [--user U] [--status D\|R]` | List transport requests (JSON, read-only); default `--status D` (in development) |
-| `create-transport --description "<DESC>" [--category Workbench\|Customizing]` | Create transport *(allow_transport + confirm each time)*; default category: `Workbench` |
+| `create-transport --package <DEVCLASS> --description "<DESC>" --ref <object-uri>` | Create transport via CreateCorrectionRequest *(allow_transport + confirm each time)*; package + object REF required; `$TMP` creates a local request; real-verified on Basis 7.56 (2026-09-17) |
 | `release-transport <TRKORR> [--yes]` | Release transport — irreversible *(allow_transport + confirm each time)* |
 
 Run any command with `--help` for full details.
@@ -294,7 +405,8 @@ python3 $CLI activate class ZCL_MY_CLASS
 
 # Transport management
 python3 $CLI list-transports --status D                              # read-only
-python3 $CLI create-transport --description "My feature"            # allow_transport + confirm
+python3 $CLI create-transport --package '$TMP' --description "My feature" \
+  --ref /sap/bc/adt/programs/programs/zmy_feature/source/main        # allow_transport + confirm
 python3 $CLI release-transport DEVK900001                           # allow_transport + confirm
 ```
 
@@ -322,17 +434,19 @@ In transaction `SICF`, activate the following service paths:
 
 ---
 
-## Output Formats
+## Output contract
 
-| Commands | Output |
-|----------|--------|
-| Source code commands (`get-program`, `get-class`, `get-function-group`, `get-function`, `get-include`, `get-interface`, `get-cds-view`, `get-type-group`) | Plain text ABAP source |
-| `get-table`, `get-structure`, `get-type-info`, `get-transaction`, `search-object` | Raw ADT XML |
-| `get-package`, `where-used`, `list-transports`, `run-sql` | JSON array |
-| `syntax-check` | Plain text messages (`[ERROR]`, `[WARNING]`, `[INFO]` prefixed); `"Syntax OK — no issues found."` if clean |
-| `status` | Plain text key-value pairs |
+All read commands emit the JSON envelope documented in **SKILL.md**
+(`ok`/`format_version`/`command`/`object`/`kind`/`data`/`meta`); source
+commands default to plain ABAP text and every kind defaults to JSON. Kinds:
+`source`, `fields`, `objects`, `rows`, `records`, `findings`, `scalar`.
+`-f/--format json|text|xml` (`SAP_ADT_FORMAT`) selects the format; `xml`
+returns the raw ADT payload. Empty results are `ok:true,row_count:0,exit 0`.
 
-All output is written to **stdout**. Errors are written to **stderr** with a non-zero exit code.
+Errors are JSON envelopes on **stderr** with exit tiers 1 (retryable),
+2 (config/credentials), 3 (safety-policy refusal — no retry), 4 (not found);
+`status`/`profile`/`credentials` remain human-readable text. See SKILL.md for
+all 16 error codes.
 
 ---
 
@@ -341,7 +455,10 @@ All output is written to **stdout**. Errors are written to **stderr** with a non
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `Not configured` | No credentials saved | Run `configure` |
-| `HTTP 401` | Wrong username or password | Re-run `configure` |
+| `Profile 'x' not found` | Unknown profile on `--profile` / `SAP_PROFILE` | Run `profile list` or `configure --profile x` |
+| `is currently active` on remove | Active profile cannot be removed | `profile use <other>` first |
+| `HTTP 401` | Wrong username or password | Re-run `configure` or `credentials set <profile>` |
+| `no password ... in the keystore` | Profile has no stored password | `credentials set <profile>` (or `credentials doctor`) |
 | `HTTP 403` | Missing `SAP_ADT_BASE` role | Ask Basis to assign authorization |
 | `HTTP 404` | Object name not found | Try `search-object` to find the correct name |
 | `HTTP 503` | `/sap/bc/adt` not active | Ask Basis to activate in `SICF` |
@@ -351,17 +468,52 @@ All output is written to **stdout**. Errors are written to **stderr** with a non
 
 ## Security Considerations
 
-- Credentials stored in `skills/sap-adt-cli/.env` or `~/.sap-adt-cli/config.json` are **plain text**.
-  Do not commit `.env`; restrict access to the JSON config file (`0600`).
+- **Passwords are never stored in plain text.** `~/.sap-adt-cli/config.json` keeps only
+  non-secret connection fields (URL, username, client, language, TLS flags); the password
+  lives in the OS keystore (DPAPI in WSL, Credential Manager, Keychain, Secret Service,
+  GPG `pass`, or the passphrase-encrypted fallback file). Run `credentials doctor` to see
+  which backend is active. Old plaintext configs are migrated automatically and stripped.
+- DPAPI/Keychain-bound secrets **cannot be copied to another machine or user** — set them
+  again after moving machines. Do not commit `secrets.json`, `secrets.enc` or any `.env`
+  file; the config directory itself should stay on the native filesystem (WSL `/mnt/c`
+  makes chmod ineffective — `credentials doctor` warns about this).
 - Avoid passing passwords via `--password` — they appear in shell history and `ps` output.
-  Prefer the interactive `configure` wizard or the `SAP_PASSWORD` environment variable.
+  Prefer the interactive `configure`/`credentials set` prompts, `SAP_ADT_<PROFILE>_PASSWORD`
+  or the `SAP_PASSWORD` environment variable.
+- Log output (including `-v/--verbose`) and HTTP error tracebacks redact `Authorization`
+  headers and password literals; there is no `credentials export` command by design.
 - Write and transport commands require explicit capability flags (`allow_write`, `allow_transport`)
   plus per-operation `[y/N]` confirmation. Never enable on production systems.
 - For shared or CI environments, use short-lived credentials and rotate them regularly.
+- Optional dependencies stay optional: `pip install keyring` for desktop vaults,
+  `pip install cryptography` for the encrypted-file fallback (the `[file]` extra).
+  The core CLI remains dependency-light.
 
 ---
 
 ## Changelog
+
+### v1.3.0 — Keystore credential storage
+
+- **No more plaintext passwords**: profile passwords move to pluggable OS keystore backends
+  (`env` → `keyring` → `dpapi` → `pass` → `file`); `config.json` keeps non-secret fields only
+- **WSL2**: Windows DPAPI via `powershell.exe` interop, secret passed over stdin (never argv)
+- **Automatic one-way migration** of existing plaintext configs on first run, with a
+  password-rotation warning; idempotent and creates no backup copies
+- **New commands**: `credentials set|forget|status|doctor`; new global options `--keystore`, `-v/--verbose`
+- **Leak hardening**: masked credential/config reprs, redacting log filter, sanitized
+  HTTP errors (no Authorization header in tracebacks), per-process decryption cache
+- Plaintext `keyrings.alt` (incl. PlaintextKeyring) and chainer backends are rejected
+  as insecure
+
+### v1.2.0 — Multi-environment profiles
+
+- **Multiple SAP environments in one config**: `~/.sap-adt-cli/config.json` now stores named profiles (`dev`, `qas`, `prd`, ...); old single-connection configs are migrated automatically to a `default` profile
+- **New commands**: `configure --profile NAME`, `profile list`, `profile use NAME` (persistent switch), `profile remove NAME`
+- **One-off profile override**: global `--profile NAME` option (before the command name) or `SAP_PROFILE` env var; selection order is `--profile` > `SAP_PROFILE` > active profile
+- **Capability flags are global**: `allow_write` / `allow_transport` now apply to every profile — check `status` before write operations
+- **Wizard UX**: prompts for a profile name; re-editing a profile with a blank password keeps the stored password
+- `.env` / `SAP_*` environment variables remain a single-environment override layer that wins over all profiles
 
 ### v1.1.1 — `run-sql` robustness improvements
 
