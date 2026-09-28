@@ -1,5 +1,6 @@
 # Credentials - NEVER commit
 .env
+.env.disabled
 *.env.local
 
 # Runtime output and Python cache
@@ -7,3 +8,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Real-machine raw ADT captures — internal hosts, usernames and business data.
+# Sanitized copies live in tests/fixtures/; see tests/fixtures/README.md.
+tests/fixtures/raw/

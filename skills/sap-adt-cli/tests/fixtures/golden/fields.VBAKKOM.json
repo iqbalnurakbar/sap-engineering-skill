@@ -1,0 +1,845 @@
+{
+  "fields": [
+    {
+      "name": "vbeln",
+      "type": "vbeln_va",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "auart",
+      "type": "auart",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "submi",
+      "type": "submi",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vkorg",
+      "type": "vkorg",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vtweg",
+      "type": "vtweg",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "spart",
+      "type": "spart",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vkgrp",
+      "type": "vkgrp",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vkbur",
+      "type": "vkbur",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vdatu",
+      "type": "edatu_vbak",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vprgr",
+      "type": "prgrs_vbak",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "bstnk",
+      "type": "bstnk",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "bstzd",
+      "type": "bstzd",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "bname",
+      "type": "bname_v",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "telf1",
+      "type": "telf1_vp",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "lifsk",
+      "type": "lifsk",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "faksk",
+      "type": "faksk",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "augru",
+      "type": "augru",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "angdt",
+      "type": "angdt_v",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "bnddt",
+      "type": "bnddt",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "guebg",
+      "type": "guebg",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "gueen",
+      "type": "gueen",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "ktext",
+      "type": "ktext_v",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kschl1",
+      "type": "kscha",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kbetr1",
+      "type": "kbetr",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kwaer1",
+      "type": "waers",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kpein1",
+      "type": "kpein",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kmein1",
+      "type": "kvmei",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kschl2",
+      "type": "kscha",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kbetr2",
+      "type": "kbetr",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kwaer2",
+      "type": "waers",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kpein2",
+      "type": "kpein",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kmein2",
+      "type": "kvmei",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kschl3",
+      "type": "kscha",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kbetr3",
+      "type": "kbetr",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kwaer3",
+      "type": "waers",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kpein3",
+      "type": "kpein",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kmein3",
+      "type": "kvmei",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kschl4",
+      "type": "kscha",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kbetr4",
+      "type": "kbetr",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kwaer4",
+      "type": "waers",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kpein4",
+      "type": "kpein",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kmein4",
+      "type": "kvmei",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "waerk",
+      "type": "waerk",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "knuma",
+      "type": "knuma",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vgbel",
+      "type": "vgbel",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vgtyp",
+      "type": "vbtypl",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "xblnr",
+      "type": "xblnr_v1",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "zuonr",
+      "type": "ordnr_v",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kvgr1",
+      "type": "kvgr1",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kvgr2",
+      "type": "kvgr2",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kvgr3",
+      "type": "kvgr3",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kvgr4",
+      "type": "kvgr4",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "kvgr5",
+      "type": "kvgr5",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "autlf",
+      "type": "autlf",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "abrvw",
+      "type": "abrvw",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "abdis",
+      "type": "abdis",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vsbed",
+      "type": "vsbed",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "taxk1",
+      "type": "taxk1_ak",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "taxk2",
+      "type": "taxk2",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "taxk3",
+      "type": "taxk3",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "taxk4",
+      "type": "taxk4",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "taxk5",
+      "type": "taxk5",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "taxk6",
+      "type": "taxk6",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "taxk7",
+      "type": "taxk7",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "taxk8",
+      "type": "taxk8",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "taxk9",
+      "type": "taxk9",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "bukrs_vf",
+      "type": "bukrs_vf",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "audat",
+      "type": "audat",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "gwldt",
+      "type": "gwldt",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "mahza",
+      "type": "mahza",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "mahdt",
+      "type": "mahdt",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "landtx",
+      "type": "landtx",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "stceg_l",
+      "type": "land1tx",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "xegdr",
+      "type": "xegdr",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vbeln_grp",
+      "type": "vbeln_grp",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "scheme_grp",
+      "type": "scheme_grp",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "abruf_part",
+      "type": "abruf_part",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "dat_fzau",
+      "type": "dat_fzau",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vsnmr_v",
+      "type": "vsnmr_v",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "qmnum",
+      "type": "qmnum",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "ps_psp_pnr",
+      "type": "ps_psp_pnr",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "ernam",
+      "type": "ernam",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vbkla",
+      "type": "vbkla",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "h_curr",
+      "type": "waers",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "logsysb",
+      "type": "logsys",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "vzeit",
+      "type": "ezeit_vbak",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "crm_guid",
+      "type": "char70",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "tas",
+      "type": "psm_tas",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "betc",
+      "type": "psm_betc",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "mod_allow",
+      "type": "psm_mod_allow",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "cancel_allow",
+      "type": "psm_canc_allow",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "pay_method",
+      "type": "dzwels",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "bpn",
+      "type": "psm_bpn",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "rep_freq",
+      "type": "psm_rep_freq",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    },
+    {
+      "name": "mndid",
+      "type": "sepa_mndid",
+      "length": null,
+      "decimals": null,
+      "is_key": false,
+      "not_null": false
+    }
+  ],
+  "unparsed_types": [
+    "vbeln_va",
+    "auart",
+    "submi",
+    "vkorg",
+    "vtweg",
+    "spart",
+    "vkgrp",
+    "vkbur",
+    "edatu_vbak",
+    "prgrs_vbak",
+    "bstnk",
+    "bstzd",
+    "bname_v",
+    "telf1_vp",
+    "lifsk",
+    "faksk",
+    "augru",
+    "angdt_v",
+    "bnddt",
+    "guebg",
+    "gueen",
+    "ktext_v",
+    "kscha",
+    "kbetr",
+    "waers",
+    "kpein",
+    "kvmei",
+    "waerk",
+    "knuma",
+    "vgbel",
+    "vbtypl",
+    "xblnr_v1",
+    "ordnr_v",
+    "kvgr1",
+    "kvgr2",
+    "kvgr3",
+    "kvgr4",
+    "kvgr5",
+    "autlf",
+    "abrvw",
+    "abdis",
+    "vsbed",
+    "taxk1_ak",
+    "taxk2",
+    "taxk3",
+    "taxk4",
+    "taxk5",
+    "taxk6",
+    "taxk7",
+    "taxk8",
+    "taxk9",
+    "bukrs_vf",
+    "audat",
+    "gwldt",
+    "mahza",
+    "mahdt",
+    "landtx",
+    "land1tx",
+    "xegdr",
+    "vbeln_grp",
+    "scheme_grp",
+    "abruf_part",
+    "dat_fzau",
+    "vsnmr_v",
+    "qmnum",
+    "ps_psp_pnr",
+    "ernam",
+    "vbkla",
+    "logsys",
+    "ezeit_vbak",
+    "char70",
+    "psm_tas",
+    "psm_betc",
+    "psm_mod_allow",
+    "psm_canc_allow",
+    "dzwels",
+    "psm_bpn",
+    "psm_rep_freq",
+    "sepa_mndid"
+  ]
+}

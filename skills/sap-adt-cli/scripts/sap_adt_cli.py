@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -29,41 +31,207 @@ _ensure_deps()
 sys.path.insert(0, _SKILL_SCRIPTS_DIR)
 
 import click
-from lib.config import run_configure_wizard, save_config_from_flags, load_config, load_config_with_source, SapConfig
-from lib import handlers
+from lib import config as config_module
+from lib.config import (
+    run_configure_wizard,
+    save_config_from_flags,
+    load_config,
+    load_config_with_source,
+    list_profiles,
+    set_active_profile,
+    remove_profile,
+    SapConfig,
+)
+from lib import credentials, credentials_reports, errors, handlers, log_redaction, output
+from lib.config import ConfigError, ProfileNotFoundError
+from lib.keystore.base import KeyStoreError
 
-__version__ = "1.1.1"
+__version__ = "1.3.0"
+
+_KEYSTORE_CHOICES = ("env", "keyring", "dpapi", "pass", "file")
+
+
+def _profile_name():
+    """Best-effort active profile name for the envelope; never blocks output."""
+    try:
+        return load_config().profile_name
+    except Exception:  # noqa: BLE001 - unconfigured/error results still print
+        return None
+
+
+def _argv_command() -> str:
+    return next((a for a in sys.argv[1:] if not a.startswith("-")), "sap-adt-cli")
+
+
+def _emit_error(decision, exit_code: int | None = None) -> None:
+    """Print the JSON error envelope on stderr and apply the tiered exit code.
+
+    ``exit_code`` overrides the tier map only for deliberate exceptions:
+    the env-write safety refusal carries CONFIG_MISSING (SAP_ENVIRONMENT is
+    genuinely not configured) but must act as a non-retryable refusal (3).
+    """
+    try:
+        command = click.get_current_context().info_name
+    except RuntimeError:
+        command = _argv_command()
+    envelope = decision.to_envelope(command, _profile_name())
+    click.echo(json.dumps(envelope, indent=2, ensure_ascii=False), err=True)
+    raise SystemExit(decision.exit_code if exit_code is None else exit_code)
+
+
+def _gate(code: str, message: str, exit_code: int | None = None) -> None:
+    _emit_error(errors.decision(code, message), exit_code)
+
+
+def _require_config(config):
+    """Emit the CONFIG_MISSING envelope for commands that pre-check config."""
+    if config is None:
+        _gate(errors.CONFIG_MISSING,
+              "Not configured. Run: sap-adt-cli configure")
+
+
+def _load_config():
+    """load_config() that turns ConfigError into the error envelope."""
+    try:
+        return load_config()
+    except (ConfigError, ProfileNotFoundError) as e:
+        _emit_error(errors.classify(e))
+
+
+def _load_config_with_source():
+    try:
+        return load_config_with_source()
+    except (ConfigError, ProfileNotFoundError) as e:
+        _emit_error(errors.classify(e))
+
+
+def _abort_on_error(result, stage: str = "") -> None:
+    """Fail a multi-stage command (write/activate) from a classified result."""
+    if result.is_error:
+        code = result.error_code or errors.SERVER_ERROR
+        message = f"{stage}: {result.text}" if stage else result.text
+        _emit_error(errors.decision(
+            code, message,
+            http_status=result.http_status,
+            hint=result.hint,
+        ))
 
 
 def _output(result) -> None:
     if result.is_error:
-        click.echo(result.text, err=True)
-        sys.exit(1)
-    click.echo(result.text)
+        code = result.error_code or errors.SERVER_ERROR
+        _emit_error(errors.decision(
+            code, result.text,
+            http_status=result.http_status, hint=result.hint,
+        ))
+    command = click.get_current_context().info_name
+    try:
+        rendered = output.render(
+            result, output.get_format(),
+            command=command, profile=_profile_name(),
+        )
+    except output.FormatUnsupported as exc:
+        _gate(errors.BAD_REQUEST, str(exc))
+    click.echo(rendered)
+
+
+def _production_refusal_hint(config) -> str:
+    if config.environment_source == "inferred":
+        return (
+            f"environment 'prd' was inferred from the profile name; if this "
+            f"is not a production system, set it explicitly with "
+            f"`configure --profile {config.profile_name} --environment dev`."
+        )
+    return "the profile is explicitly marked environment=prd."
+
+
+def _profile_or_env_hint(config, flag: str) -> str:
+    return (
+        f"Re-run `configure --profile {config.profile_name} {flag}` to enable "
+        f"it on this profile, or set the legacy global switch."
+    )
 
 
 def _require_write(config: SapConfig) -> None:
-    if not config.allow_write:
-        click.echo(
-            "ERROR: Source code write is disabled.\n"
-            "Re-run `configure` and enable write mode "
-            "(answer 'y' to 'Enable source code write?'), "
-            "or use --allow-write flag during configure.",
-            err=True,
+    _require_env_write_context(config, "write")
+    if config.is_production:
+        _gate(
+            errors.WRITE_DISABLED,
+            f"Write operations are hard-refused on profile "
+            f"'{config.profile_name}' (environment=prd); neither the global "
+            f"nor the profile flag can override this. "
+            f"{_production_refusal_hint(config)}",
         )
-        raise SystemExit(1)
+    if not config.allow_write:
+        who = config.profile_name or "(environment variables)"
+        _gate(
+            errors.WRITE_DISABLED,
+            f"Source code write is disabled for '{who}' (effective flag "
+            f"source: {config.write_source}). {_profile_or_env_hint(config, '--allow-write')}",
+        )
 
 
 def _require_transport_write(config: SapConfig) -> None:
-    if not config.allow_transport:
-        click.echo(
-            "ERROR: Transport write operations are disabled.\n"
-            "Re-run `configure` and enable transport mode "
-            "(answer 'y' to 'Enable transport write operations?'), "
-            "or use --allow-transport flag during configure.",
-            err=True,
+    _require_env_write_context(config, "transport")
+    if config.is_production:
+        _gate(
+            errors.TRANSPORT_DISABLED,
+            f"Transport write operations are hard-refused on profile "
+            f"'{config.profile_name}' (environment=prd); neither the global "
+            f"nor the profile flag can override this. "
+            f"{_production_refusal_hint(config)}",
         )
-        raise SystemExit(1)
+    if not config.allow_transport:
+        who = config.profile_name or "(environment variables)"
+        _gate(
+            errors.TRANSPORT_DISABLED,
+            f"Transport write operations are disabled for '{who}' "
+            f"(effective flag source: {config.transport_source}). "
+            f"{_profile_or_env_hint(config, '--allow-transport')}",
+        )
+
+
+def _require_platform(config) -> str:
+    """Transport commands must know the backend flavour; it is never guessed."""
+    platform = config_module.normalize_platform(getattr(config, "platform", ""))
+    if not platform:
+        _gate(
+            errors.CONFIG_MISSING,
+            "Backend platform not configured. ADT registers the Change & "
+            "Transport System resources at different URLs on S/4HANA and on "
+            "ECC, so transport commands cannot proceed without knowing which "
+            "this is. Ask the user whether this system is S/4HANA or ECC, "
+            "then run `configure --platform s4` or `configure --platform ecc` "
+            "(other saved settings are kept).",
+        )
+    return platform
+
+
+def _require_env_write_context(config, kind: str = "write") -> None:
+    """Env-var/.env connections need SAP_ENVIRONMENT before any write.
+
+    Reads are unaffected: there is no profile name to infer the environment
+    from, so CI/container callers must declare the target explicitly.
+    """
+    if not getattr(config, "from_environment", False):
+        return
+    requested = (config.env_write_requested if kind == "write"
+                 else config.env_transport_requested)
+    if not requested:
+        return
+    if config.environment_source == "default":
+        # Configuration is missing (SAP_ENVIRONMENT), but this is also a
+        # non-retryable safety refusal: exit 3 with the CONFIG_MISSING code.
+        _gate(
+            errors.CONFIG_MISSING,
+            "SAP_ENVIRONMENT must be set explicitly when enabling writes via "
+            "environment variables (no profile context available to infer "
+            "from).",
+            exit_code=3,
+        )
+    if config.is_production:
+        code = errors.WRITE_DISABLED if kind == "write" else errors.TRANSPORT_DISABLED
+        _gate(code, "Writes are hard-refused when SAP_ENVIRONMENT=prd.")
 
 
 def _require_sql_write(config: dict) -> None:
@@ -80,18 +248,27 @@ def _require_sql_write(config: dict) -> None:
     allowed = False  # noqa: hardcoded policy
 
     if not allowed:
-        click.echo(
-            "ERROR: SQL write operations (INSERT/UPDATE/DELETE/MERGE/MODIFY/TRUNCATE) "
-            "are not permitted.\n"
-            "Direct DML execution via run-sql is disabled in this version.",
-            err=True,
+        _gate(
+            errors.DML_REJECTED,
+            "SQL write operations (INSERT/UPDATE/DELETE/MERGE/MODIFY/TRUNCATE) "
+            "are not permitted. Direct DML execution via run-sql is disabled "
+            "in this version.",
         )
-        raise SystemExit(1)
+
+
+def _stdin_is_tty() -> bool:
+    return sys.stdin is not None and sys.stdin.isatty()
 
 
 def _confirm_change(preview_lines: list, yes: bool = False) -> None:
     if yes:
         return
+    if not _stdin_is_tty():
+        _gate(
+            errors.CONFIRM_REQUIRED,
+            "Confirmation required but stdin is not a terminal; re-run in a "
+            "terminal or pass --yes explicitly for trusted automation.",
+        )
     click.echo("\u2500" * 50, err=True)
     click.echo("PREVIEW \u2014 changes to be made:", err=True)
     for line in preview_lines:
@@ -103,21 +280,54 @@ def _confirm_change(preview_lines: list, yes: bool = False) -> None:
         err=True,
     )
     if answer.strip().lower() != "y":
-        click.echo("Aborted \u2014 no changes made.", err=True)
-        raise SystemExit(0)
+        _gate(errors.USER_ABORTED, "Aborted \u2014 no changes made.")
 
 
 @click.group(name="sap-adt-cli")
 @click.version_option(version=__version__, prog_name="sap-adt-cli")
-def cli():
+@click.option(
+    "--profile",
+    default=None,
+    help="SAP environment profile to use for this single command "
+         "(overrides active profile and SAP_PROFILE; see 'profile list')",
+)
+@click.option(
+    "--keystore",
+    default=None,
+    type=click.Choice(_KEYSTORE_CHOICES),
+    help="Force the credential backend for this command (fail-closed if it "
+         "is unavailable); see 'credentials doctor'",
+)
+@click.option(
+    "-f", "--format", "fmt",
+    default=None,
+    type=click.Choice(output.VALID_FORMATS),
+    envvar=output.FORMAT_ENVVAR,
+    help="Output format json|text|xml. Source commands default to plain "
+         "text, others to a JSON envelope; xml returns the raw ADT payload. "
+         "Env: SAP_ADT_FORMAT (flag wins over env).",
+)
+@click.option("-v", "--verbose", is_flag=True, default=False,
+              help="Verbose logging (secrets stay redacted)")
+def cli(profile, keystore, fmt, verbose):
     """Read and write ABAP source code and metadata from SAP systems via the ADT REST API.
 
-    Credentials are loaded from environment variables (SAP_URL, SAP_USERNAME,
-    SAP_PASSWORD, SAP_CLIENT), the SKILL-local .env file, or
-    ~/.sap-adt-cli/config.json.
+    Multiple SAP environments are stored as profiles in
+    ~/.sap-adt-cli/config.json. Switch persistently with 'profile use NAME'
+    or per command with '--profile NAME' (SAP_PROFILE env var also supported).
+
+    Credentials for the selected profile can additionally be overridden by
+    environment variables (SAP_URL, SAP_USERNAME, SAP_PASSWORD, SAP_CLIENT)
+    or the SKILL-local .env file.
 
     Run 'configure' on first use to save your connection settings.
     """
+    log_redaction.configure_logging(verbose)
+    output.set_format(fmt)
+    if profile:
+        config_module.set_profile_override(profile)
+    if keystore:
+        credentials.set_preferred(keystore)
 
 
 @cli.command()
@@ -127,16 +337,32 @@ def cli():
 @click.option("--client",                 default=None, help="SAP client number (e.g. 100)")
 @click.option("--language",               default=None, help="Language code (default: EN)")
 @click.option("--verify-ssl/--no-verify-ssl", "verify_ssl", default=None, help="Enable/disable SSL certificate verification (unchanged if omitted)")
-@click.option("--allow-write/--no-allow-write",         default=None, help="Enable source code write (write-source, activate). Unchanged if omitted.")
-@click.option("--allow-transport/--no-allow-transport", default=None, help="Enable transport write operations (create-transport, release-transport). Unchanged if omitted.")
-@click.option("--platform", default=None, help="Backend flavour: s4 (S/4HANA) or ecc (ECC / NetWeaver). Required for transport commands.")
-def configure(url, username, password, client, language, verify_ssl, allow_write, allow_transport, platform):
-    """Save SAP connection credentials.
+@click.option("--allow-write/--no-allow-write",         default=None, help="Enable source code write for THIS profile (preferred). Unchanged if omitted.")
+@click.option("--allow-transport/--no-allow-transport", default=None, help="Enable transport writes for THIS profile (preferred). Unchanged if omitted.")
+@click.option("--global-allow-write/--no-global-allow-write", default=None,
+              help="Write the LEGACY global fallback switch (applies only when the profile declares neither)")
+@click.option("--global-allow-transport/--no-global-allow-transport", default=None,
+              help="Write the LEGACY global transport fallback switch")
+@click.option("--environment", default=None,
+              type=click.Choice(["dev", "qas", "prd"]),
+              help="Logical environment (default: inferred from profile name; prd hard-refuses writes)")
+@click.option("--platform", default=None,
+              help="Backend flavour: s4 (S/4HANA) or ecc (ECC / NetWeaver). Required for transport commands; ask the user, never infer.")
+@click.option("--profile", default=None, help="Profile name to create or update (default: active profile, or 'default' on first run)")
+def configure(url, username, password, client, language, verify_ssl,
+              allow_write, allow_transport, global_allow_write,
+              global_allow_transport, environment, platform, profile):
+    """Save SAP connection credentials for one environment profile.
+
+    The saved profile becomes the active profile. Add more environments
+    with `configure --profile NAME` and switch with `profile use NAME`.
 
     When called with flags the credentials are saved non-interactively —
     useful for agent workflows. When called with no flags an interactive
     wizard is launched instead (recommended for human use in a terminal,
-    as it avoids exposing the password in shell history).
+    as it avoids exposing the password in shell history). Settings not
+    given on the command line keep their saved values, so e.g.
+    `configure --platform ecc` alone is safe on a configured profile.
 
     Security note: passing --password on the command line may expose it in
     shell history and process listings. Prefer the interactive wizard or
@@ -152,53 +378,334 @@ def configure(url, username, password, client, language, verify_ssl, allow_write
                 "the SAP_PASSWORD environment variable instead.",
                 err=True,
             )
-        save_config_from_flags(
-            url=url,
-            username=username,
-            password=password,
-            client=client,
-            language=language,
-            verify_ssl=verify_ssl,
-            allow_write=allow_write,
-            allow_transport=allow_transport,
-            platform=platform,
-        )
+        # Non-interactive path: callers are agents, so failures are JSON
+        # envelopes with tiered exits (never plain text). Discrimination is
+        # by "any connection, platform or on/off flag present", not TTY state.
+        try:
+            # Profile-scoped is the default; --allow-write/--allow-transport
+            # write the profile section, the --global-* legacy flags the
+            # top-level fallback. Setting neither leaves existing values.
+            save_config_from_flags(
+                url=url,
+                username=username,
+                password=password,
+                client=client,
+                language=language,
+                verify_ssl=verify_ssl,
+                allow_write=allow_write,
+                allow_transport=allow_transport,
+                profile=profile,
+                environment=environment,
+                profile_scope=True,
+                global_write=global_allow_write,
+                global_transport=global_allow_transport,
+                platform=platform,
+            )
+        except (ConfigError, ProfileNotFoundError, ValueError) as e:
+            _emit_error(errors.classify(e))
     else:
-        run_configure_wizard()
+        # Interactive wizard: human-in-the-loop flow keeps plain text.
+        run_configure_wizard(profile=profile)
 
 
 @cli.command()
 def status():
-    """Show the current SAP connection configuration."""
-    config, source = load_config_with_source()
+    """Show the active SAP environment profile and connection configuration."""
+    config, source = _load_config_with_source()
     if config is None:
-        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
-        sys.exit(1)
+        _gate(errors.CONFIG_MISSING,
+              "Not configured. Run: sap-adt-cli configure "
+              "(manage environments with 'profile list').")
+    click.echo(f"Profile:         {config.profile_name or '(environment override)'}")
     click.echo(f"URL:             {config.url}")
     click.echo(f"Username:        {config.username}")
     click.echo(f"Client:          {config.client}")
     click.echo(f"Language:        {config.language}")
     click.echo(f"SSL:             {'verify' if config.verify_ssl else 'skip (self-signed allowed)'}")
-    click.echo(f"Write mode:      {'ENABLED' if config.allow_write else 'DISABLED'}")
-    click.echo(f"Transport write: {'ENABLED' if config.allow_transport else 'DISABLED'}")
+    env_note = {
+        "inferred": " (inferred from profile name)",
+        "explicit": " (explicit)",
+        "default": "",
+    }.get(config.environment_source, "")
+    click.echo(f"Environment:     {config.environment}{env_note}")
+    legacy = " (legacy fallback)" if config.write_source == "global" else ""
+    legacy_t = " (legacy fallback)" if config.transport_source == "global" else ""
+    refused = config.write_source == "hard-refused"
+    refused_t = config.transport_source == "hard-refused"
+    click.echo(
+        "Write mode:      "
+        + ("HARD-REFUSED (environment=prd)" if refused
+           else f"{'ENABLED' if config.allow_write else 'DISABLED'} (source: {config.write_source}{legacy})")
+    )
+    click.echo(
+        "Transport write: "
+        + ("HARD-REFUSED (environment=prd)" if refused_t
+           else f"{'ENABLED' if config.allow_transport else 'DISABLED'} (source: {config.transport_source}{legacy_t})")
+    )
     click.echo(f"Platform:        {config.platform.upper() if config.platform else 'NOT SET (required for transport commands)'}")
     click.echo(f"Config source:   {source}")
 
 
-def _require_platform(config):
-    """Transport commands must know the backend flavour; it is never guessed."""
-    if not getattr(config, "platform", ""):
-        lines = (
-            "ERROR: backend platform not configured.",
-            "ADT registers the Change & Transport System resources at different",
-            "URLs on S/4HANA and on ECC, so transport commands cannot proceed",
-            "without knowing which this is.",
-            "Ask the user whether this system is S/4HANA or ECC, then run:",
-            "  sap-adt-cli configure --platform s4     (S/4HANA)",
-            "  sap-adt-cli configure --platform ecc    (ECC / NetWeaver)",
+@cli.group("profile")
+def profile_group():
+    """Manage SAP environment profiles (dev, qas, prd, ...)."""
+
+
+@profile_group.command("list")
+def profile_list():
+    """List all configured SAP environments and show which one is active."""
+    profiles = list_profiles()
+    if profiles is None:
+        _gate(errors.CONFIG_MISSING,
+              f"Could not parse {config_module.CONFIG_FILE}. Fix or remove the file.")
+    if not profiles:
+        click.echo("No profiles configured. Run: sap-adt-cli configure")
+        return
+    allow_write, allow_transport = config_module.get_global_capabilities()
+    click.echo(f"{'':1} {'NAME':<16} {'ENV':<5} {'PLAT':<5} {'CLIENT':<7} {'USERNAME':<16} URL")
+    for p in profiles:
+        marker = "*" if p["active"] else " "
+        click.echo(
+            f"{marker} {p['name']:<16} {p['environment']:<5} {p.get('platform') or '-':<5} "
+            f"{p['client']:<7} {p['username']:<16} {p['url']}"
         )
-        click.echo(chr(10).join(lines), err=True)
+    active = next((p["name"] for p in profiles if p["active"]), None)
+    click.echo(f"\nActive profile: {active or '(none)'}")
+    click.echo(
+        f"Legacy global fallback switches — write: {'ENABLED' if allow_write else 'DISABLED'}, "
+        f"transport write: {'ENABLED' if allow_transport else 'DISABLED'}"
+    )
+
+
+@profile_group.command("use")
+@click.argument("name")
+def profile_use(name):
+    """Switch the active SAP environment profile persistently."""
+    try:
+        set_active_profile(name)
+    except ValueError as e:
+        _gate(errors.PROFILE_NOT_FOUND, str(e))
+    click.echo(f"Active profile is now '{name}'.")
+
+
+@profile_group.command("remove")
+@click.argument("name")
+def profile_remove(name):
+    """Delete a SAP environment profile (the active profile cannot be removed)."""
+    try:
+        remove_profile(name)
+    except ValueError as e:
+        _gate(errors.PROFILE_NOT_FOUND, str(e))
+    click.echo(f"Profile '{name}' removed.")
+
+
+@cli.group("credentials")
+def credentials_group():
+    """Manage profile passwords stored in the system keystore.
+
+    Backends (in priority order): env, keyring, dpapi, pass, file.
+    Run 'credentials doctor' to see which one is active on this machine.
+    There is deliberately no 'export' command.
+    """
+
+
+def _find_profile_or_exit(profile_name):
+    profiles = {p["name"]: p for p in (config_module.list_profiles() or [])}
+    if profile_name not in profiles:
+        _gate(
+            errors.PROFILE_NOT_FOUND,
+            f"Profile '{profile_name}' not found in {config_module.CONFIG_FILE}. "
+            f"Create it first with `configure --profile {profile_name}`.",
+        )
+    return profiles[profile_name]
+
+
+def _read_secret(profile_name, password_opt):
+    if password_opt:
+        click.echo(
+            "Warning: --password may expose the secret in shell history and "
+            "process listings. Prefer the interactive prompt or the "
+            f"SAP_ADT_{profile_name.upper()}_PASSWORD environment variable.",
+            err=True,
+        )
+        return password_opt
+    env_name = f"SAP_ADT_{profile_name.upper()}_PASSWORD"
+    env_value = os.getenv(env_name)
+    if env_value:
+        return env_value
+    if sys.stdin.isatty():
+        import getpass
+
+        first = getpass.getpass("Password (input hidden): ")
+        second = getpass.getpass("Confirm password: ")
+        if first != second:
+            _gate(errors.BAD_REQUEST, "Passwords do not match.")
+        return first
+    _gate(
+        errors.CONFIG_MISSING,
+        f"No password supplied and stdin is not a terminal. "
+        f"Set {env_name} or pass --password.",
+    )
+
+
+@credentials_group.command("set")
+@click.argument("profile_name", metavar="PROFILE")
+@click.option("--user", default=None, help="SAP user (default: username stored in the profile)")
+@click.option("--password", default=None, help="Password (prefer prompt or env var; see warning)")
+def credentials_set(profile_name, user, password):
+    """Store PROFILE's password in the selected keystore (prompted, hidden)."""
+    profile = _find_profile_or_exit(profile_name)
+    username = user or profile.get("username")
+    if not username:
+        _gate(errors.BAD_REQUEST,
+              f"Profile '{profile_name}' has no username; pass --user.")
+    secret = _read_secret(profile_name, password)
+    try:
+        backend = credentials.save(profile_name, username, secret)
+    except KeyStoreError as e:
+        _gate(errors.CONFIG_MISSING, str(e))
+    click.echo(f"Password for profile '{profile_name}' stored in keystore '{backend}'.")
+
+
+@credentials_group.command("forget")
+@click.argument("profile_name", metavar="PROFILE")
+def credentials_forget(profile_name):
+    """Delete PROFILE's password from all writable keystores (or --keystore one)."""
+    _find_profile_or_exit(profile_name)
+    try:
+        removed = credentials.forget(profile_name)
+    except KeyStoreError as e:
+        _gate(errors.CONFIG_MISSING, str(e))
+    if removed:
+        # delete() is idempotent: this is a purge across writable backends,
+        # not a claim that every one of them held an entry.
+        click.echo(f"Purged password for '{profile_name}' from: {', '.join(removed)}")
+    else:
+        click.echo(f"No writable keystore available to purge '{profile_name}' from.")
+
+
+@credentials_group.command("status")
+def credentials_status():
+    """Show which profiles have a stored password — never prints the password."""
+    click.echo(credentials_reports.status_text())
+
+
+@credentials_group.command("doctor")
+@click.option("--coverage", is_flag=True, default=False,
+              help="Instead of the keystore report, show command coverage for the "
+                   "connected ADT system (from its discovery document).")
+def credentials_doctor(coverage):
+    """Diagnose backend availability; --coverage adds the ADT resource matrix."""
+    if coverage:
+        result = handlers.coverage()
+        if result.is_error:
+            _abort_on_error(result)
+        if output.get_format() == "json":
+            click.echo(json.dumps(result.data, indent=2, ensure_ascii=False))
+        else:
+            click.echo(result.text)
+        return
+    click.echo(credentials_reports.doctor_text())
+
+
+@cli.command("run-unit-test")
+@click.argument("object_name")
+@click.option("--type", "object_type", default="class",
+              type=click.Choice(["program", "class", "interface", "include", "function"]),
+              help="Object type containing the tests (default: class)")
+@click.option("--group", default=None, help="Function group (required for --type function)")
+@click.option("--risk-level", default="harmless",
+              type=click.Choice(["harmless", "dangerous", "critical"]),
+              help="harmless is default and read-only; dangerous/critical may modify data and require allow_write")
+@click.option("--duration", default="short",
+              type=click.Choice(["short", "medium", "long"]))
+@click.option("--yes", is_flag=True, default=False,
+              help="Skip confirmation for dangerous/critical (trusted automation only)")
+@click.option("--fail-on", default="error",
+              type=click.Choice(["error", "warning", "info", "never"]))
+def run_unit_test_cmd(object_name, object_type, group, risk_level, duration, yes, fail_on):
+    """Run ABAP Unit tests for a class/program/include (read-only at harmless)."""
+    config = _load_config()
+    _require_config(config)
+    if risk_level in ("dangerous", "critical"):
+        # Executing code at these levels may modify business data: treat as
+        # a write operation (profile-level prd refusal happens inside the
+        # shared gate), then show the risk-specific confirmation preview.
+        _require_write(config)
+        preview = [
+            f"Action   : Run ABAP Unit tests ({risk_level} risk, {duration} duration)",
+            f"Object   : {object_type.upper()} {object_name.upper()}",
+            f"WARNING  : {risk_level}-level tests may MODIFY BUSINESS DATA on this system.",
+        ]
+        _confirm_change(preview, yes=yes)
+
+    result = handlers.run_unit_test(
+        object_type, object_name, group=group,
+        risk_level=risk_level, duration=duration,
+    )
+    if result.is_error:
+        _abort_on_error(result)
+    click.echo(output.render(result, output.get_format(),
+                             command="run-unit-test", profile=_profile_name()))
+    _fail_on_findings(result, fail_on)
+
+
+def _fail_on_findings(result, threshold: str) -> None:
+    if threshold == "never":
+        return
+    levels = {"error": {"error"}, "warning": {"error", "warning"},
+              "info": {"error", "warning", "info"}}
+    # Human-approved exemptions are auditable in output but never fail CI.
+    found = [
+        f for f in (result.data or {}).get("findings", [])
+        if f.get("severity") in levels[threshold] and not f.get("exempted")
+    ]
+    if found:
         sys.exit(1)
+
+
+@cli.command("run-atc")
+@click.argument("object_name")
+@click.option("--type", "object_type", default="class",
+              type=click.Choice(["program", "class", "interface", "include", "function"]))
+@click.option("--group", default=None, help="Function group (required for --type function)")
+@click.option("--variant", default="STANDARD", show_default=True, help="ATC check variant")
+@click.option("--max-results", default=100, show_default=True)
+@click.option("--fail-on", default="error",
+              type=click.Choice(["error", "warning", "info", "never"]))
+def run_atc_cmd(object_name, object_type, group, variant, max_results, fail_on):
+    """Run static ATC checks for an object (no side effects, no gate)."""
+    result = handlers.run_atc(object_type, object_name, group=group,
+                              variant=variant, max_results=max_results)
+    if result.is_error:
+        _abort_on_error(result)
+    click.echo(output.render(result, output.get_format(),
+                             command="run-atc", profile=_profile_name()))
+    _fail_on_findings(result, fail_on)
+
+
+@cli.command("discovery")
+@click.option("--emit-markdown", "emit_markdown", default=None,
+              type=click.Path(writable=True, dir_okay=False),
+              help="Write a generated endpoint table to PATH (local file only).")
+def discovery_cmd(emit_markdown):
+    """List ADT resources exposed by this system (Atom discovery document).
+
+    Returns a 'capabilities' envelope (collections with href/title/
+    content_types); --format xml returns the raw Atom service document.
+    """
+    if emit_markdown:
+        result = handlers.discovery()
+        if result.is_error:
+            _abort_on_error(result)
+        md = handlers.coverage_lib.render_discovery_markdown(
+            result.data["collections"]
+        )
+        with click.open_file(emit_markdown, "w", encoding="utf-8") as f:
+            f.write(md)
+        click.echo(f"Wrote generated endpoint table to {emit_markdown}")
+        return
+    _output(handlers.discovery())
 
 
 @cli.command("get-program")
@@ -254,7 +761,7 @@ def get_structure(structure_name):
     """Retrieve ABAP DDIC structure definition.
 
     STRUCTURE_NAME is the dictionary structure name, e.g. VBAKKOM.
-    Returns the field list in XML format.
+    Returns a 'fields' envelope (JSON by default; --format xml for raw ADT).
     """
     _output(handlers.get_structure(structure_name))
 
@@ -265,7 +772,7 @@ def get_table(table_name):
     """Retrieve ABAP DDIC transparent table field definitions.
 
     TABLE_NAME is the dictionary table name, e.g. VBAK or MARA.
-    Returns the field list in XML format.
+    Returns a 'fields' envelope (JSON by default; --format xml for raw ADT).
     """
     _output(handlers.get_table(table_name))
 
@@ -276,8 +783,8 @@ def get_package(package_name):
     """List all objects in an ABAP package.
 
     PACKAGE_NAME is the development package name, e.g. ZMYPACKAGE.
-    Returns a JSON array of objects with keys:
-    OBJECT_TYPE, OBJECT_NAME, OBJECT_DESCRIPTION, OBJECT_URI.
+    Returns an 'objects' envelope (JSON by default; source commands default to
+    plain text; --format xml returns the raw ADT payload).
     """
     _output(handlers.get_package(package_name))
 
@@ -288,8 +795,8 @@ def get_type_info(type_name):
     """Retrieve domain or data element information from DDIC.
 
     TYPE_NAME is the domain or data element name, e.g. MATNR or BUKRS.
-    Tries domain first; falls back to data element if not found.
-    Returns XML.
+    Tries domain first; falls back to the data element only on HTTP 404.
+    Returns a 'scalar' envelope; data.resolved_as is 'domain' or 'dataelement'.
     """
     _output(handlers.get_type_info(type_name))
 
@@ -320,7 +827,7 @@ def get_transaction(transaction_name):
     """Retrieve transaction properties (package, application component).
 
     TRANSACTION_NAME is the transaction code, e.g. VA01 or MM60.
-    Returns XML with package and application component information.
+    Returns a 'scalar' envelope (facets: package/application/...).
     """
     _output(handlers.get_transaction(transaction_name))
 
@@ -332,7 +839,7 @@ def search_object(query, max_results):
     """Search for ABAP objects by name (supports * wildcard).
 
     QUERY is a name pattern, e.g. ZCL_ORDER* or BAPI_SALES*.
-    Returns XML with matching object names, types, and URIs.
+    Returns an 'objects' envelope (name/type/uri/package/description).
 
     Examples:
       search-object "ZCL_*"
@@ -358,10 +865,14 @@ def syntax_check_cmd(object_type, object_name, group):
     """
     result = handlers.syntax_check(object_type, object_name, group=group)
     if result.is_error:
-        click.echo(result.text, err=True)
-        sys.exit(1)
-    click.echo(result.text)
-    if "[ERROR]" in result.text:
+        _abort_on_error(result)
+    command = click.get_current_context().info_name
+    click.echo(output.render(
+        result, output.get_format(), command=command, profile=_profile_name()
+    ))
+    # Exit 1 when the check found hard errors (warnings/info stay 0).
+    if any((f.get("severity") == "error")
+           for f in (result.data or {}).get("findings", [])):
         sys.exit(1)
 
 
@@ -395,27 +906,24 @@ def get_type_group(name):
               help="ADT program type: executableProgram, includeProgram, modulePool, subroutinePool")
 @click.option("--yes",         is_flag=True, default=False, help="Skip confirmation prompt. Use only in trusted automation.")
 def create_program_cmd(program_name, description, package, transport, program_type, yes):
-    """Create an ABAP program shell - requires allow_write + confirmation each time.
+    """Create an ABAP program shell — requires allow_write + confirmation each time.
 
-    Creates the object only; its source stays empty. Follow with:
+    Creates the object only. Check its source with get-program, then:
 
         write-source program <NAME> --file <PATH> --transport <TR> --activate
 
     Requires 'allow_write' enabled in config. Run `configure` to enable.
     """
-    config = load_config()
-    if config is None:
-        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
-        sys.exit(1)
+    config = _load_config()
+    _require_config(config)
     _require_write(config)
 
     if package.upper() != "$TMP" and not transport:
-        click.echo(
-            "ERROR: a transportable package requires --transport "
+        _gate(
+            errors.BAD_REQUEST,
+            "A transportable package requires --transport "
             "(or pass --package $TMP to create a local object).",
-            err=True,
         )
-        sys.exit(1)
 
     preview = [
         "Action      : Create ABAP program (shell only, no source)",
@@ -448,10 +956,8 @@ def set_program_ldb_cmd(program_name, ldb, transport, yes):
 
     Requires 'allow_write' enabled in config. Run `configure` to enable.
     """
-    config = load_config()
-    if config is None:
-        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
-        sys.exit(1)
+    config = _load_config()
+    _require_config(config)
     _require_write(config)
 
     preview = [
@@ -484,10 +990,8 @@ def write_source_cmd(object_type, object_name, source_file, group, transport, ac
 
     Requires 'allow_write' enabled in config. Run `configure` to enable.
     """
-    config = load_config()
-    if config is None:
-        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
-        sys.exit(1)
+    config = _load_config()
+    _require_config(config)
     _require_write(config)
 
     with click.open_file(source_file, "r", encoding="utf-8") as f:
@@ -507,25 +1011,22 @@ def write_source_cmd(object_type, object_name, source_file, group, transport, ac
     try:
         uri = handlers.get_object_uri(object_type, object_name, group=group)
     except ValueError as e:
-        click.echo(str(e), err=True)
-        sys.exit(1)
+        _gate(errors.BAD_REQUEST, str(e))
 
     click.echo(f"[1/{n}] Locking {object_type.upper()} {object_name.upper()} ...", err=True, nl=False)
     lock_result = handlers.lock_object(uri)
     if lock_result.is_error:
         click.echo("  FAILED", err=True)
-        click.echo(lock_result.text, err=True)
-        sys.exit(1)
+        _abort_on_error(lock_result, "lock")
     lock_handle = lock_result.text
-    click.echo(f"  OK  (handle: {lock_handle})", err=True)
+    click.echo(f"  OK  (handle: {hashlib.sha256(lock_handle.encode()).hexdigest()[:8]})", err=True)
 
     try:
         click.echo(f"[2/{n}] Writing source ({byte_count} bytes) ...", err=True, nl=False)
         put_result = handlers.put_source(uri, content, lock_handle, transport=transport)
         if put_result.is_error:
             click.echo("  FAILED", err=True)
-            click.echo(put_result.text, err=True)
-            sys.exit(1)
+            _abort_on_error(put_result, "write")
         click.echo("  OK", err=True)
     finally:
         click.echo(f"[3/{n}] Unlocking ...", err=True, nl=False)
@@ -537,8 +1038,7 @@ def write_source_cmd(object_type, object_name, source_file, group, transport, ac
         act_result = handlers.activate_object(object_type, object_name, group=group)
         if act_result.is_error:
             click.echo("  FAILED", err=True)
-            click.echo(act_result.text, err=True)
-            sys.exit(1)
+            _abort_on_error(act_result, "activate")
         click.echo("  OK", err=True)
 
     click.echo("Write complete.")
@@ -557,10 +1057,8 @@ def activate_cmd(object_type, object_name, group, yes):
 
     Requires 'allow_write' enabled in config. Run `configure` to enable.
     """
-    config = load_config()
-    if config is None:
-        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
-        sys.exit(1)
+    config = _load_config()
+    _require_config(config)
     _require_write(config)
     preview = [
         "Action  : Activate object",
@@ -581,8 +1079,8 @@ def where_used_cmd(object_type, object_name, max_results, group):
     OBJECT_TYPE: program / class / interface / include / function
     OBJECT_NAME: SAP object name (UPPERCASE recommended)
 
-    Returns a JSON array of {type, name, uri} objects.
-    Returns [] if no usages found (exit 0).
+    Returns an 'objects' envelope; objects may carry usage_line/usage_uri.
+    An empty result is ok:true with row_count:0 (exit 0).
     """
     _output(handlers.where_used(object_type, object_name, max_results=max_results, group=group))
 
@@ -597,23 +1095,20 @@ def run_sql_cmd(sql, max_rows):
       "SELECT * FROM t001 UP TO 10 ROWS"
 
     Supports SAP Open SQL syntax only — not Native SQL or JDBC-style syntax.
-    Returns a JSON array of row objects.
+    Returns a 'rows' envelope (columns + row matrix).
 
     DML statements (INSERT, UPDATE, DELETE, MODIFY, TRUNCATE) are blocked.
     Detection is by first keyword, case-insensitive.
     """
-    config = load_config()
-    if config is None:
-        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
-        sys.exit(1)
+    config = _load_config()
+    _require_config(config)
     _SQL_WRITE_KEYWORDS = {"INSERT", "UPDATE", "DELETE", "MERGE", "MODIFY", "TRUNCATE"}
     first_keyword = sql.strip().upper().split()[0] if sql.strip() else ""
     is_write_sql = first_keyword in _SQL_WRITE_KEYWORDS
     if is_write_sql:
         _require_sql_write(config)
     if max_rows > 10000:
-        click.echo("ERROR: --max-rows cannot exceed 10000.", err=True)
-        sys.exit(1)
+        _gate(errors.BAD_REQUEST, "--max-rows cannot exceed 10000.")
     _output(handlers.run_sql(sql, max_rows))
 
 
@@ -623,129 +1118,92 @@ def run_sql_cmd(sql, max_rows):
 def list_transports_cmd(user, status):
     """List transport requests — read-only, no capability flag required.
 
-    Returns a JSON array of {trkorr, description, status, owner} objects.
+    Returns a 'records' envelope with status/status_text per transport.
+    Needs the backend platform (s4/ecc) configured: the endpoints differ.
     """
-    config = load_config()
-    if config is None:
-        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
-        sys.exit(1)
+    config = _load_config()
+    _require_config(config)
     _require_platform(config)
     effective_user = user or config.username
     _output(handlers.list_transports(effective_user, status=status))
 
 
 @cli.command("create-transport")
+@click.option("--package", "package", required=True,
+              help="Package (DEVCLASS) to create the request for; $TMP for a local request")
 @click.option("--description", required=True, help="Transport request description")
-@click.option("--category",    default="Workbench", show_default=True, help="Transport category: Workbench or Customizing (S/4HANA only; ECC is always Workbench)")
-@click.option("--target",      default="", help="Transport target system (S/4HANA only). On ECC the backend derives it from the package.")
-@click.option("--package",     default="", help="Package (DEVCLASS) the request is for. Required on ECC, ignored on S/4HANA.")
-@click.option("--yes",         is_flag=True, default=False, help="Skip confirmation prompt. Use only in trusted automation.")
-def create_transport_cmd(description, category, target, package, yes):
+@click.option("--ref", "ref", default="",
+              help="Relative ADT object URI the request refers to, e.g. "
+                   "/sap/bc/adt/programs/programs/zfoo/source/main "
+                   "(required on S/4HANA, not used on ECC)")
+@click.option("--yes", is_flag=True, default=False, help="Skip confirmation prompt. Use only in trusted automation.")
+def create_transport_cmd(package, description, ref, yes):
     """Create a transport request — requires allow_transport + confirmation each time.
 
-    Returns the new transport request number (e.g. NSDK900003).
+    Uses the measured CreateCorrectionRequest protocol. S/4HANA (real-verified
+    on Basis 7.56, 2026-09-17): DEVCLASS + object REF are both required.
+    ECC: DEVCLASS only; the target is derived from the package and the
+    request is always Workbench. Returns the new transport request number
+    (e.g. DEVK900003).
 
-    Requires 'allow_transport' enabled in config. Run `configure` to enable.
-
-    The required options differ by platform, because ADT exposes different
-    CTS resources on each:
-
-      S/4HANA  --target is required (the target system is never defaulted).
-      ECC      --package is required; the backend derives the target from the
-               package's transport layer, and the category is always Workbench.
+    Requires 'allow_transport' enabled in config and the backend platform
+    (s4/ecc) configured. Run `configure` to enable.
     """
-    config = load_config()
-    if config is None:
-        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
-        sys.exit(1)
+    config = _load_config()
+    _require_config(config)
     _require_transport_write(config)
-    _require_platform(config)
-
-    if config.platform == "ecc":
-        if not package:
+    platform = _require_platform(config)
+    if platform == config_module.PLATFORM_ECC:
+        if ref:
             click.echo(
-                "ERROR: --package is required on ECC. The backend derives the "
-                "transport target from the package's transport layer, so it "
-                "cannot create the request without one. Ask the user which "
-                "package this belongs to — never infer it.",
+                "NOTE: --ref is not used on ECC; the backend derives the "
+                f"transport target from package {package}.",
                 err=True,
             )
-            sys.exit(1)
-        if target:
-            click.echo(
-                f"NOTE: --target {target} ignored on ECC; the backend derives the "
-                f"target from package {package}.",
-                err=True,
-            )
-        resolved_target = f"(derived from package {package})"
-        resolved_category = "Workbench (fixed on ECC)"
+        ref_line = "(not used on ECC)"
     else:
-        if not target:
-            # The target system is never defaulted or auto-resolved, not even when
-            # the value help offers a single candidate. Surface the candidates so
-            # the caller can put the choice to the user, then abort.
-            try:
-                candidates = handlers.list_transport_targets()
-            except Exception:
-                candidates = []
-            hint = (f" Available targets: {', '.join(candidates)}."
-                    if candidates else
-                    " Could not read /valuehelp/target to list candidates.")
-            click.echo(
-                "ERROR: --target is required on S/4HANA. The transport target system "
-                "must be chosen explicitly by the user, never defaulted." + hint,
-                err=True,
+        if not ref:
+            _gate(
+                errors.BAD_REQUEST,
+                "--ref is required on S/4HANA: a relative ADT object URI the "
+                "request refers to, e.g. /sap/bc/adt/programs/programs/zfoo/source/main.",
             )
-            sys.exit(1)
-        resolved_target = target
-        resolved_category = category
-
+        ref_line = ref
     preview = [
         "Action      : Create transport request",
-        f"Platform    : {config.platform.upper()}",
-        f"Category    : {resolved_category}",
+        f"Platform    : {platform.upper()}",
+        f"Package     : {package}",
+        f"Ref object  : {ref_line}",
         f"Description : {description}",
         f"Owner       : {config.username}",
-        f"Package     : {package or '(n/a)'}",
-        f"Target      : {resolved_target or '(none)'}",
     ]
     _confirm_change(preview, yes=yes)
-    _output(handlers.create_transport(
-        description,
-        category=category,
-        username=config.username,
-        target=target,
-        package=package,
-    ))
+    _output(handlers.create_transport(package, description, ref))
 
 
 @cli.command("release-transport")
 @click.argument("trkorr")
 @click.option("--yes", is_flag=True, default=False, help="Skip confirmation prompt. Use only in trusted automation.")
-def release_transport_cmd(trkorr, yes):
-    """Release a transport request — irreversible, requires allow_transport + confirmation each time.
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Preflight only: existence, owner, status and gates; no release request.")
+def release_transport_cmd(trkorr, yes, dry_run):
+    """Release a transport request — irreversible, requires allow_transport + confirmation.
 
-    TRKORR is the transport request number, e.g. DEVK900001.
+    After the release jobs are submitted the transport status is read back
+    (poll up to 120s). RELEASE_UNVERIFIED means the final state is unknown —
+    never re-release, verify manually in SE09/SE10.
 
-    WARNING: This operation CANNOT be undone. Once released, the transport
-    cannot be recalled or modified.
-
-    Requires 'allow_transport' enabled in config. Run `configure` to enable.
+    S/4HANA only: ECC exposes no release endpoint over ADT (use SE01/SE09).
     """
-    config = load_config()
-    if config is None:
-        click.echo("Not configured. Run: sap-adt-cli configure", err=True)
-        sys.exit(1)
+    config = _load_config()
+    _require_config(config)
     _require_transport_write(config)
-    _require_platform(config)
-    if config.platform == "ecc":
-        click.echo(
-            "ERROR: release-transport is not available over ADT on ECC - the backend "
-            "does not expose a release endpoint on the HTTP branch. Release the "
-            "request in SE01/SE09 instead.",
-            err=True,
-        )
-        sys.exit(1)
+    if _require_platform(config) == config_module.PLATFORM_ECC:
+        _gate(errors.BAD_REQUEST, handlers.ECC_RELEASE_UNSUPPORTED)
+    if dry_run:
+        result = handlers.release_transport(trkorr, dry_run=True)
+        _output(result)
+        return
     preview = [
         "Action  : Release transport request",
         f"TRKORR  : {trkorr}",
@@ -753,7 +1211,14 @@ def release_transport_cmd(trkorr, yes):
         "          Once released, the transport cannot be recalled or modified.",
     ]
     _confirm_change(preview, yes=yes)
-    _output(handlers.release_transport(trkorr))
+
+    def _progress(msg: str):
+        click.echo(msg, err=True)
+
+    result = handlers.release_transport(trkorr, progress=_progress)
+    if result.is_error:
+        _abort_on_error(result)
+    _output(result)
 
 
 if __name__ == "__main__":

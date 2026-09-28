@@ -7,47 +7,86 @@ from urllib.parse import quote
 
 import requests
 
-from .client import make_adt_request
-from .config import PLATFORM_ECC, PLATFORM_S4, get_config, normalize_platform
+from . import coverage as coverage_lib
+from . import errors
+from .client import AdtHttpError, make_adt_request
+from .config import PLATFORM_ECC, ConfigError, get_config, normalize_platform
+from .parsers import capabilities as parse_capabilities
+from .parsers import fields as parse_fields
+from .parsers import findings as parse_findings
+from .parsers import objects as parse_objects
+from .parsers import records as parse_records
+from .parsers import rows as parse_rows
+from .parsers import scalar as parse_scalar
+from .parsers import source as parse_source
+from .parsers.common import ParseError
 
 
 @dataclass
 class AdtResult:
-    text: str
+    text: str = ""
     is_error: bool = False
+    # Structured-output fields (kind != "raw" when the command is normalized).
+    kind: str = "raw"
+    data: Optional[dict] = None
+    object: Optional[dict] = None
+    meta: Optional[dict] = None
+    # Original ADT payload kept for --format xml passthrough.
+    raw: Optional[str] = None
+    # Classified error fields (is_error=True), produced via lib.errors.
+    error_code: Optional[str] = None
+    http_status: Optional[int] = None
+    hint: Optional[str] = None
 
 
 def _base() -> str:
     return get_config().base_url()
 
 
-PLATFORM_HINT = (
-    "Transport commands need to know the backend flavour, because ADT registers "
-    "the CTS resources at different URLs on S/4HANA and on ECC. Ask the user "
-    "which system this is, then run:  sap-adt-cli configure --platform s4|ecc"
-)
-
-
 def _platform() -> str:
-    """Backend flavour ('s4' / 'ecc'), or '' when it has not been stated."""
-    return normalize_platform(getattr(get_config(), "platform", ""))
+    """Backend flavour ('s4' / 'ecc'), or '' when it has not been stated.
+
+    The CLI refuses transport commands until the platform is configured;
+    handlers treat an unset platform as S/4HANA so they stay usable when
+    called directly. A missing configuration is reported by the request
+    itself (via _base), not here, so argument validation keeps its order.
+    """
+    try:
+        config = get_config()
+    except ConfigError:
+        return ""
+    return normalize_platform(getattr(config, "platform", ""))
 
 
 def _enc(name: str) -> str:
     return quote(name, safe="")
 
 
-def _ok(resp: requests.Response) -> AdtResult:
-    return AdtResult(text=resp.text)
-
-
 def _err(exc: Exception) -> AdtResult:
-    if isinstance(exc, requests.HTTPError) and exc.response is not None:
-        return AdtResult(
-            text=f"HTTP {exc.response.status_code}: {exc.response.text or str(exc)}",
-            is_error=True,
-        )
-    return AdtResult(text=str(exc), is_error=True)
+    # Single classification point lives in lib.errors; AdtHttpError
+    # messages are pre-sanitized (no Authorization headers).
+    d = errors.classify(exc)
+    return AdtResult(
+        text=d.message,
+        is_error=True,
+        error_code=d.code,
+        http_status=d.http_status,
+        hint=d.hint,
+    )
+
+
+def _obj(obj_type: str, name: str) -> dict:
+    return {"type": obj_type, "name": (name or "").upper()}
+
+
+def _structured(kind: str, data: dict, obj: dict, raw: Optional[str] = None,
+                meta: Optional[dict] = None) -> AdtResult:
+    return AdtResult(kind=kind, data=data, object=obj, raw=raw, meta=meta)
+
+
+def _source_result(resp: requests.Response, obj_type: str, name: str) -> AdtResult:
+    data = parse_source.parse(resp.content)
+    return _structured("source", data, _obj(obj_type, name), raw=None)
 
 
 def _xattr(s: str) -> str:
@@ -55,28 +94,26 @@ def _xattr(s: str) -> str:
     return s.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _xtext(s: str) -> str:
-    """Escape a string for safe embedding as XML element content."""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
 def get_program(program_name: str) -> AdtResult:
     try:
-        return _ok(make_adt_request(f"{_base()}/sap/bc/adt/programs/programs/{_enc(program_name)}/source/main"))
+        resp = make_adt_request(f"{_base()}/sap/bc/adt/programs/programs/{_enc(program_name)}/source/main")
+        return _source_result(resp, "program", program_name)
     except Exception as e:
         return _err(e)
 
 
 def get_class(class_name: str) -> AdtResult:
     try:
-        return _ok(make_adt_request(f"{_base()}/sap/bc/adt/oo/classes/{_enc(class_name)}/source/main"))
+        resp = make_adt_request(f"{_base()}/sap/bc/adt/oo/classes/{_enc(class_name)}/source/main")
+        return _source_result(resp, "class", class_name)
     except Exception as e:
         return _err(e)
 
 
 def get_function_group(function_group: str) -> AdtResult:
     try:
-        return _ok(make_adt_request(f"{_base()}/sap/bc/adt/functions/groups/{_enc(function_group)}/source/main"))
+        resp = make_adt_request(f"{_base()}/sap/bc/adt/functions/groups/{_enc(function_group)}/source/main")
+        return _source_result(resp, "function-group", function_group)
     except Exception as e:
         return _err(e)
 
@@ -87,21 +124,34 @@ def get_function(function_name: str, function_group: str) -> AdtResult:
             f"{_base()}/sap/bc/adt/functions/groups/{_enc(function_group)}"
             f"/fmodules/{_enc(function_name)}/source/main"
         )
-        return _ok(make_adt_request(url))
+        return _source_result(make_adt_request(url), "function", function_name)
     except Exception as e:
         return _err(e)
 
 
+def _fields_result(resp: requests.Response, obj_type: str, name: str) -> AdtResult:
+    parsed = parse_fields.parse(resp.content)
+    unparsed = parsed.pop("unparsed_types", [])
+    meta = {"unparsed_types": unparsed} if unparsed else None
+    return _structured("fields", parsed, _obj(obj_type, name), raw=resp.text, meta=meta)
+
+
 def get_structure(structure_name: str) -> AdtResult:
     try:
-        return _ok(make_adt_request(f"{_base()}/sap/bc/adt/ddic/structures/{_enc(structure_name)}/source/main"))
+        resp = make_adt_request(
+            f"{_base()}/sap/bc/adt/ddic/structures/{_enc(structure_name)}/source/main"
+        )
+        return _fields_result(resp, "structure", structure_name)
     except Exception as e:
         return _err(e)
 
 
 def get_table(table_name: str) -> AdtResult:
     try:
-        return _ok(make_adt_request(f"{_base()}/sap/bc/adt/ddic/tables/{_enc(table_name)}/source/main"))
+        resp = make_adt_request(
+            f"{_base()}/sap/bc/adt/ddic/tables/{_enc(table_name)}/source/main"
+        )
+        return _fields_result(resp, "table", table_name)
     except Exception as e:
         return _err(e)
 
@@ -117,48 +167,45 @@ def get_package(package_name: str) -> AdtResult:
                 "withShortDescriptions": "true",
             },
         )
-        root = ET.fromstring(resp.text)
-        ns_obj = "{http://www.sap.com/abapxml}"
-        items = []
-        for node in root.findall(f".//{ns_obj}SEU_ADT_REPOSITORY_OBJ_NODE"):
-            name_el = node.find(f"{ns_obj}OBJECT_NAME")
-            uri_el = node.find(f"{ns_obj}OBJECT_URI")
-            if name_el is None or uri_el is None:
-                continue
-            type_el = node.find(f"{ns_obj}OBJECT_TYPE")
-            desc_el = node.find(f"{ns_obj}DESCRIPTION")
-            items.append({
-                "OBJECT_TYPE": type_el.text if type_el is not None else "",
-                "OBJECT_NAME": name_el.text,
-                "OBJECT_DESCRIPTION": desc_el.text if desc_el is not None else "",
-                "OBJECT_URI": uri_el.text,
-            })
-        return AdtResult(text=json.dumps(items, indent=2))
+        data = parse_objects.parse(resp.content)
+        return _structured("objects", data, _obj("package", package_name), raw=resp.text)
     except Exception as e:
         return _err(e)
 
 
 def get_type_info(type_name: str) -> AdtResult:
+    # Domain metadata resource is /ddic/domains/{name} (v2); the old
+    # .../source/main path 404s on modern releases. Fall back to the data
+    # element only for a genuine 404; the parser reports resolved_as.
     try:
-        return _ok(make_adt_request(f"{_base()}/sap/bc/adt/ddic/domains/{_enc(type_name)}/source/main"))
-    except Exception:
-        pass
+        resp = make_adt_request(f"{_base()}/sap/bc/adt/ddic/domains/{_enc(type_name)}")
+        data = parse_scalar.parse(resp.content)
+        return _structured("scalar", data, _obj("type", type_name), raw=resp.text)
+    except AdtHttpError as e:
+        if e.status != 404:
+            return _err(e)
+    except Exception as e:
+        return _err(e)
     try:
-        return _ok(make_adt_request(f"{_base()}/sap/bc/adt/ddic/dataelements/{_enc(type_name)}"))
+        resp = make_adt_request(f"{_base()}/sap/bc/adt/ddic/dataelements/{_enc(type_name)}")
+        data = parse_scalar.parse(resp.content)
+        return _structured("scalar", data, _obj("type", type_name), raw=resp.text)
     except Exception as e:
         return _err(e)
 
 
 def get_include(include_name: str) -> AdtResult:
     try:
-        return _ok(make_adt_request(f"{_base()}/sap/bc/adt/programs/includes/{_enc(include_name)}/source/main"))
+        resp = make_adt_request(f"{_base()}/sap/bc/adt/programs/includes/{_enc(include_name)}/source/main")
+        return _source_result(resp, "include", include_name)
     except Exception as e:
         return _err(e)
 
 
 def get_interface(interface_name: str) -> AdtResult:
     try:
-        return _ok(make_adt_request(f"{_base()}/sap/bc/adt/oo/interfaces/{_enc(interface_name)}/source/main"))
+        resp = make_adt_request(f"{_base()}/sap/bc/adt/oo/interfaces/{_enc(interface_name)}/source/main")
+        return _source_result(resp, "interface", interface_name)
     except Exception as e:
         return _err(e)
 
@@ -170,7 +217,9 @@ def get_transaction(transaction_name: str) -> AdtResult:
             f"?uri=%2Fsap%2Fbc%2Fadt%2Fvit%2Fwb%2Fobject_type%2Ftrant%2Fobject_name%2F{_enc(transaction_name)}"
             f"&facet=package&facet=appl"
         )
-        return _ok(make_adt_request(url))
+        resp = make_adt_request(url)
+        data = parse_scalar.parse(resp.content)
+        return _structured("scalar", data, _obj("transaction", transaction_name), raw=resp.text)
     except Exception as e:
         return _err(e)
 
@@ -181,7 +230,193 @@ def search_object(query: str, max_results: int = 100) -> AdtResult:
             f"{_base()}/sap/bc/adt/repository/informationsystem/search"
             f"?operation=quickSearch&query={_enc(query)}&maxResults={max_results}"
         )
-        return _ok(make_adt_request(url))
+        resp = make_adt_request(url)
+        data = parse_objects.parse(resp.content)
+        return _structured("objects", data, _obj("search", query), raw=resp.text)
+    except Exception as e:
+        return _err(e)
+
+
+def discovery() -> AdtResult:
+    try:
+        resp = make_adt_request(
+            f"{_base()}/sap/bc/adt/discovery",
+            extra_headers={"Accept": "application/atomsvc+xml, application/*"},
+        )
+        data = parse_capabilities.parse(resp.content)
+        return _structured("capabilities", data,
+                           {"type": "discovery", "name": None}, raw=resp.text)
+    except Exception as e:
+        return _err(e)
+
+
+def coverage() -> AdtResult:
+    """Coverage report (raw text for the CLI; structured data in .data)."""
+    result = discovery()
+    if result.is_error:
+        return result
+    report = coverage_lib.compute_coverage(result.data["collections"])
+    return AdtResult(
+        kind="raw",
+        data=report,
+        text=coverage_lib.render_text(report),
+    )
+
+
+AUNIT_VERSIONS = ("v4", "v3", "v2", "v1")
+
+
+def _unit_uri(object_type: str, object_name: str, group: Optional[str]) -> str:
+    """Semantic, lower-case object URI for AUnit (class tested directly)."""
+    t = object_type.lower()
+    name = (object_name or "").lower()
+    if t == "class":
+        return f"/sap/bc/adt/oo/classes/{_enc(name)}"
+    if t == "interface":
+        return f"/sap/bc/adt/oo/interfaces/{_enc(name)}"
+    if t == "include":
+        return f"/sap/bc/adt/programs/includes/{_enc(name)}"
+    if t == "program":
+        return f"/sap/bc/adt/programs/programs/{_enc(name)}"
+    if t == "function":
+        if not group:
+            raise ValueError("--group is required when OBJECT_TYPE is 'function'")
+        return f"/sap/bc/adt/functions/groups/{_enc(group.lower())}/fmodules/{_enc(name)}"
+    raise ValueError(
+        f"Unsupported type: {object_type!r}. "
+        "program / class / interface / include / function"
+    )
+
+
+def _unit_body(uri: str, *, harmless: bool, dangerous: bool, critical: bool,
+               duration: str) -> bytes:
+    return f'''<?xml version="1.0" encoding="UTF-8"?>
+<aunit:runConfiguration xmlns:aunit="http://www.sap.com/adt/aunit">
+<options>
+<uriType value="semantic"/>
+<testDeterminationStrategy sameProgram="true" assignedTests="false"/>
+<testRiskLevels harmless="{str(harmless).lower()}" dangerous="{str(dangerous).lower()}" critical="{str(critical).lower()}"/>
+<testDurations short="{str(duration=='short').lower()}" medium="{str(duration=='medium').lower()}" long="{str(duration=='long').lower()}"/>
+<withNavigationUri enabled="true"/>
+</options>
+<adtcore:objectSets xmlns:adtcore="http://www.sap.com/adt/core">
+<objectSet kind="inclusive"><adtcore:objectReferences>
+<adtcore:objectReference adtcore:uri="{uri}"/>
+</adtcore:objectReferences></objectSet>
+</adtcore:objectSets>
+</aunit:runConfiguration>'''.encode("utf-8")
+
+
+AUNIT_CONFIG_V4 = "application/vnd.sap.adt.abapunit.testruns.config.v4+xml"
+AUNIT_ACCEPT = (
+    "application/vnd.sap.adt.abapunit.testruns.result.v2+xml, application/*"
+)
+
+
+def run_unit_test(object_type: str, object_name: str, group: Optional[str] = None,
+                  risk_level: str = "harmless", duration: str = "short") -> AdtResult:
+    if risk_level not in ("harmless", "dangerous", "critical"):
+        return _err(ValueError(
+            "risk-level must be harmless, dangerous or critical"
+        ))
+    if duration not in ("short", "medium", "long"):
+        return _err(ValueError("duration must be short, medium or long"))
+    try:
+        uri = _unit_uri(object_type, object_name, group)
+        risks = {
+            "harmless": (True, False, False),
+            "dangerous": (False, True, False),
+            "critical": (False, False, True),
+        }[risk_level]
+        body = _unit_body(uri, harmless=risks[0], dangerous=risks[1],
+                          critical=risks[2], duration=duration)
+        url = f"{_base()}/sap/bc/adt/abapunit/testruns"
+        config_version = "v4"
+        fallback = False
+        try:
+            resp = make_adt_request(
+                url, method="POST", data=body, timeout=300,
+                extra_headers={"Content-Type": AUNIT_CONFIG_V4,
+                               "Accept": AUNIT_ACCEPT},
+            )
+        except AdtHttpError as e:
+            if e.status not in (400, 406, 415):
+                raise
+            resp = make_adt_request(
+                url, method="POST", data=body, timeout=300,
+                extra_headers={"Content-Type": "application/*",
+                               "Accept": "application/*"},
+            )
+            config_version = "application/*"
+            fallback = True
+        parsed = parse_findings.parse_unit(resp.content)
+        meta = parsed.pop("_meta")
+        meta["risk_level"] = risk_level
+        meta["config_version"] = config_version
+        if fallback:
+            meta["config_version_fallback"] = True
+        return _structured("findings", parsed, _obj(object_type, object_name),
+                           raw=resp.text, meta=meta)
+    except ValueError as e:
+        return _err(e)
+    except Exception as e:
+        return _err(e)
+
+
+def run_atc(object_type: str, object_name: str, group: Optional[str] = None,
+            variant: str = "STANDARD", max_results: int = 100) -> AdtResult:
+    """Run ATC checks (static, no gate): worklist -> run -> worklist GET."""
+    try:
+        uri = _unit_uri(object_type, object_name, group)
+        # 1) create a worklist for the variant -> plain-text GUID
+        wl = make_adt_request(
+            f"{_base()}/sap/bc/adt/atc/worklists",
+            method="POST",
+            params={"checkVariant": variant},
+            extra_headers={"Accept": "text/plain"},
+            timeout=120,
+        )
+        worklist_id = wl.text.strip()
+        # 2) trigger the run (synchronous on this release; returns worklistRun)
+        body = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f'<atc:run maximumVerdicts="{max_results}" xmlns:atc="http://www.sap.com/adt/atc">'
+            '<objectSets xmlns:adtcore="http://www.sap.com/adt/core">'
+            '<objectSet kind="inclusive"><adtcore:objectReferences>'
+            f'<adtcore:objectReference adtcore:uri="{uri}"/>'
+            '</adtcore:objectReferences></objectSet>'
+            '</objectSets></atc:run>'
+        ).encode("utf-8")
+        make_adt_request(
+            f"{_base()}/sap/bc/adt/atc/runs",
+            method="POST",
+            params={"worklistId": worklist_id},
+            data=body,
+            extra_headers={"Accept": "application/xml",
+                           "Content-Type": "application/xml"},
+            timeout=300,
+        )
+        # 3) fetch the populated worklist
+        def fetch():
+            return make_adt_request(
+                f"{_base()}/sap/bc/adt/atc/worklists/{worklist_id}",
+                extra_headers={"Accept": "application/atc.worklist.v1+xml"},
+                timeout=120,
+            )
+        resp = fetch()
+        parsed = parse_findings.parse_atc(resp.content)
+        meta = parsed.pop("_meta")
+        if meta.get("result_incomplete"):
+            # Object set not fully evaluated yet: re-fetch exactly once (no
+            # poll loop); if still incomplete the flag stays in meta and the
+            # caller sees result_incomplete:true plus the smaller-set advice.
+            resp = fetch()
+            parsed = parse_findings.parse_atc(resp.content)
+            meta = parsed.pop("_meta")
+        return _structured("findings", parsed, _obj(object_type, object_name),
+                           raw=resp.text, meta=meta)
+    except ValueError as e:
+        return _err(e)
     except Exception as e:
         return _err(e)
 
@@ -216,6 +451,19 @@ def _tag_local(elem) -> str:
 
 
 def _extract_lock_handle(resp: requests.Response) -> str:
+    # Modern protocol (verified S/4HANA 2021 / Basis 7.56, 2026-09-16):
+    # POST ?_action=LOCK returns an ABAP-serialized payload
+    # (application/vnd.sap.as+xml; dataname=com.sap.adt.lock.result):
+    # asx:abap/asx:values/DATA/LOCK_HANDLE.
+    if resp.text:
+        try:
+            root = ET.fromstring(resp.text)
+            for elem in root.iter():
+                if _tag_local(elem) == "LOCK_HANDLE" and elem.text:
+                    return elem.text.strip()
+        except ET.ParseError:
+            pass
+    # Legacy shape: handle in response header, or <handle>/<lockHandle> XML.
     handle = resp.headers.get("com.sap.adt.lock.handle", "")
     if handle:
         return handle
@@ -225,40 +473,14 @@ def _extract_lock_handle(resp: requests.Response) -> str:
             for elem in root.iter():
                 for k, v in elem.attrib.items():
                     kl = k.split("}")[-1] if "}" in k else k
-                    if kl.replace("_", "").lower() in ("handle", "lockhandle"):
+                    if kl in ("handle", "lockHandle", "lock"):
                         return v
                 tl = _tag_local(elem)
-                # ADT returns <LOCK_HANDLE> inside asx:abap/asx:values/DATA
-                if tl.replace("_", "").lower() in ("handle", "lockhandle") and elem.text:
+                if tl in ("handle", "lockHandle") and elem.text:
                     return elem.text.strip()
         except ET.ParseError:
             return resp.text.strip()
     return ""
-
-
-def _parse_syntax_check(xml_text: str) -> str:
-    if not xml_text or not xml_text.strip():
-        return "Syntax OK — no issues found."
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return xml_text
-
-    messages = []
-    for elem in root.iter():
-        flat = _flat_attribs(elem)
-        severity = flat.get("severity", "")
-        text = flat.get("text", "") or flat.get("description", "")
-        line = flat.get("line", "") or flat.get("offset", "")
-        if not severity or not text:
-            continue
-        tag = severity.upper()
-        if tag not in ("ERROR", "WARNING", "INFO"):
-            continue
-        line_str = f" line {line}:" if line and line != "0" else ""
-        messages.append(f"[{tag}]{line_str} {text}")
-
-    return "\n".join(messages) if messages else "Syntax OK — no issues found."
 
 
 def _parse_activation_errors(xml_text: str) -> list:
@@ -280,137 +502,303 @@ def _parse_activation_errors(xml_text: str) -> list:
     return errors
 
 
-def _parse_where_used(xml_text: str) -> list:
-    if not xml_text or not xml_text.strip():
-        return []
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return []
-
-    ns_core = "http://www.sap.com/adt/core"
-    items = []
-    for ref in root.iter(f"{{{ns_core}}}objectReference"):
-        name = ref.get(f"{{{ns_core}}}name") or ref.get("name", "")
-        type_ = ref.get(f"{{{ns_core}}}type") or ref.get("type", "")
-        uri = ref.get(f"{{{ns_core}}}uri") or ref.get("uri", "")
-        if name:
-            items.append({"type": type_, "name": name, "uri": uri})
-    if not items:
-        for elem in root.iter():
-            if _tag_local(elem) == "objectReference":
-                flat = _flat_attribs(elem)
-                name = flat.get("name", "")
-                if name:
-                    items.append({
-                        "type": flat.get("type", ""),
-                        "name": name,
-                        "uri": flat.get("uri", ""),
-                    })
-    return items
-
-
-def _parse_sql_result(xml_text: str) -> list:
-    if not xml_text or not xml_text.strip():
-        return []
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return []
-
-    columns_ordered = []
-
-    for elem in root.iter():
-        if _tag_local(elem) != "columns":
-            continue
-        meta = next((c for c in elem if _tag_local(c) == "metadata"), None)
-        if meta is None:
-            continue
-        col_name = _flat_attribs(meta).get("name", "")
-        if not col_name:
-            continue
-        dataset = next((c for c in elem if _tag_local(c) == "dataSet"), None)
-        values = []
-        if dataset is not None:
-            values = [d.text or "" for d in dataset if _tag_local(d) == "data"]
-        columns_ordered.append((col_name, values))
-
-    if not columns_ordered:
-        for elem in root.iter():
-            if _tag_local(elem) != "column":
-                continue
-            flat = _flat_attribs(elem)
-            col_name = flat.get("name", "")
-            if not col_name:
-                continue
-            rows = []
-            for child in elem:
-                cl = _tag_local(child)
-                if cl in ("row", "cell", "value"):
-                    rows.append(child.text or "")
-            if not rows:
-                for rows_elem in elem.iter():
-                    if _tag_local(rows_elem) == "rows":
-                        for row_elem in rows_elem:
-                            rows.append(row_elem.text or "")
-                        break
-            columns_ordered.append((col_name, rows))
-
-    if not columns_ordered:
-        return []
-    n_rows = max(len(v) for _, v in columns_ordered)
-    result = []
-    for i in range(n_rows):
-        row = {}
-        for col_name, values in columns_ordered:
-            row[col_name] = values[i] if i < len(values) else ""
-        result.append(row)
-    return result
-
-
-def _parse_transports(xml_text: str, status_filter: str = "") -> list:
-    if not xml_text or not xml_text.strip():
-        return []
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return []
-
-    items = []
-    for elem in root.iter():
-        tl = _tag_local(elem)
-        if tl not in ("workitem", "transport", "request"):
-            continue
-        flat = _flat_attribs(elem)
-        attr_map = {}
-        for child in elem.iter():
-            if _tag_local(child) == "attribute":
-                cf = _flat_attribs(child)
-                aname = cf.get("name", "")
-                avalue = cf.get("value", "")
-                if aname:
-                    attr_map[aname] = avalue
-
-        trkorr = attr_map.get("TRKORR") or flat.get("number") or flat.get("TRKORR", "")
-        desc = (attr_map.get("AS4TEXT") or flat.get("desc")
-                or flat.get("description") or flat.get("AS4TEXT", ""))
-        status = attr_map.get("TRSTATUS") or flat.get("status") or flat.get("TRSTATUS", "")
-        owner = attr_map.get("AS4USER") or flat.get("owner") or flat.get("AS4USER", "")
-
-        if not trkorr:
-            continue
-        if status_filter and status.upper() != status_filter.upper():
-            continue
-        items.append({
-            "trkorr": trkorr,
-            "description": desc,
-            "status": status,
-            "owner": owner,
-        })
-    return items
-
 
 def syntax_check(
+    object_type: str,
+    object_name: str,
+    group: Optional[str] = None,
+) -> AdtResult:
+    try:
+        uri = get_object_uri(object_type, object_name, group=group)
+        name = _xattr(object_name.upper())
+        # New check-run resource (the legacy /abapsource/syntaxcheck returns
+        # 404 on modern releases): checkObjectList request, checkmessages reply.
+        body = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<chk:checkObjectList xmlns:chk="http://www.sap.com/adt/checkrun" '
+            'xmlns:adtcore="http://www.sap.com/adt/core">'
+            f'<chk:checkObject adtcore:uri="{_xattr(uri)}" adtcore:name="{name}">'
+            '<chk:reporter chk:name="abapCheckRun"/>'
+            '</chk:checkObject>'
+            '</chk:checkObjectList>'
+        ).encode("utf-8")
+        resp = make_adt_request(
+            f"{_base()}/sap/bc/adt/checkruns",
+            method="POST",
+            data=body,
+            extra_headers={
+                "Content-Type": "application/vnd.sap.adt.checkobjects+xml",
+                "Accept": "application/vnd.sap.adt.checkmessages+xml",
+            },
+        )
+        data = parse_findings.parse(resp.content)
+        return _structured("findings", data, _obj(object_type, object_name), raw=resp.text)
+    except ValueError as e:
+        return _err(e)
+    except Exception as e:
+        return _err(e)
+
+
+def get_cds_view(name: str) -> AdtResult:
+    try:
+        resp = make_adt_request(
+            f"{_base()}/sap/bc/adt/ddic/ddl/sources/{_enc(name)}/source/main"
+        )
+        return _source_result(resp, "cds-view", name)
+    except Exception as e:
+        return _err(e)
+
+
+def get_type_group(name: str) -> AdtResult:
+    try:
+        resp = make_adt_request(
+            f"{_base()}/sap/bc/adt/typegroups/groups/{_enc(name)}/source/main"
+        )
+        return _source_result(resp, "type-group", name)
+    except Exception as e:
+        return _err(e)
+
+
+def where_used(
+    object_type: str,
+    object_name: str,
+    max_results: int = 50,
+    group: Optional[str] = None,
+) -> AdtResult:
+    # New POST-only usageReferences resource. Per the abap-adt-api reference
+    # implementation the uri query parameter is the RELATIVE, lower-case
+    # object URI and both content types are application/*.
+    usage_body = (
+        '<?xml version="1.0" encoding="ASCII"?>'
+        '<usagereferences:usageReferenceRequest '
+        'xmlns:usagereferences="http://www.sap.com/adt/ris/usageReferences">'
+        '<usagereferences:affectedObjects/>'
+        '</usagereferences:usageReferenceRequest>'
+    ).encode("utf-8")
+    try:
+        uri = get_object_uri(object_type, object_name, group=group).lower()
+        try:
+            resp = make_adt_request(
+                f"{_base()}/sap/bc/adt/repository/informationsystem/usageReferences",
+                method="POST",
+                params={"uri": uri},
+                data=usage_body,
+                extra_headers={"Content-Type": "application/*", "Accept": "application/*"},
+                timeout=120,
+            )
+        except AdtHttpError as e:
+            # Older releases: the legacy GET whereused resource.
+            if e.status not in (404, 405):
+                raise
+            resp = make_adt_request(
+                f"{_base()}/sap/bc/adt/repository/informationsystem/whereused",
+                params={"uri": f"{_base()}{uri}", "maxResults": max_results},
+                extra_headers={
+                    "Accept": (
+                        "application/vnd.sap.adt.repository.informationsystem.whereused+xml"
+                    )
+                },
+            )
+        data = parse_objects.parse(resp.content)
+        data["objects"] = data["objects"][:max_results]
+        return _structured("objects", data, _obj(object_type, object_name), raw=resp.text)
+    except ValueError as e:
+        return _err(e)
+    except Exception as e:
+        return _err(e)
+
+
+def run_sql(sql: str, max_rows: int = 100) -> AdtResult:
+    url = f"{_base()}/sap/bc/adt/datapreview/freestyle"
+    # Modern releases accept the SQL only as a POST body (GET -> 405);
+    # older releases took sqlCommand as a GET query parameter. Try POST
+    # first and fall back to GET on 405 for those systems. DML is rejected
+    # earlier, in the CLI before any request is sent.
+    try:
+        try:
+            resp = make_adt_request(
+                url,
+                method="POST",
+                params={"rowNumber": max_rows},
+                data=sql.encode("utf-8"),
+                extra_headers={
+                    "Content-Type": "text/plain; charset=utf-8",
+                    "Accept": "application/vnd.sap.adt.datapreview.table.v1+xml",
+                },
+                timeout=60,
+            )
+        except AdtHttpError as e:
+            if e.status != 405:
+                raise
+            resp = make_adt_request(
+                url,
+                params={"rowNumber": max_rows, "sqlCommand": sql},
+                extra_headers={
+                    "Accept": "application/vnd.sap.adt.datapreview.table.v1+xml"
+                },
+            )
+        data = parse_rows.parse(resp.content)
+        # The Data Preview rowNumber parameter (--max-rows) is the hard cap;
+        # verified 2026-09-16: an SQL "UP TO N ROWS" clause is IGNORED when
+        # rowNumber is present (tests: UP TO 5/100 -> 100 rows, UP TO 200/10
+        # -> 10 rows, no UP TO/7 -> 7 rows). Surface this instead of letting
+        # the SQL clause silently mislead callers.
+        meta = {"row_limit_applied": max_rows, "row_limit_source": "rowNumber"}
+        m = re.search(r"\bUP\s+TO\s+(\d+)\s+ROWS?\b", sql, re.IGNORECASE)
+        if m:
+            meta["sql_up_to"] = int(m.group(1))
+            if m and meta["sql_up_to"] != max_rows:
+                meta["row_limit_conflict"] = True
+        return _structured("rows", data, {"type": "run-sql", "name": None},
+                           raw=resp.text, meta=meta)
+    except Exception as e:
+        return _err(e)
+
+
+def list_transports(user: str = "", status: str = "D") -> AdtResult:
+    try:
+        if _platform() == PLATFORM_ECC:
+            return _list_transports_ecc(user, status)
+        # New transport-organizer tree resource (the legacy /cts/transports
+        # worklist document returns 406 on modern releases).
+        resp = make_adt_request(
+            f"{_base()}/sap/bc/adt/cts/transportrequests",
+            extra_headers={
+                "Accept": "application/vnd.sap.adt.transportorganizertree.v1+xml"
+            },
+        )
+        data = parse_records.parse(resp.content)
+        records = data["transports"]
+        # --user/--status stay supported via client-side filtering.
+        if user:
+            records = [t for t in records if (t.get("owner") or "").upper() == user.upper()]
+        if status:
+            records = [t for t in records if (t.get("status") or "").upper() == status.upper()]
+        return _structured("records", {"transports": records}, None, raw=resp.text)
+    except Exception as e:
+        return _err(e)
+
+
+def _list_transports_ecc(user: str, status: str) -> AdtResult:
+    # ECC registers only /cts/transports and /cts/transportchecks over HTTP
+    # (CL_CTS_ADT_RES_APP->register_resources returns early on the HTTP
+    # branch), so /cts/transportrequests is a 404 there. Listing is the FIND
+    # action, handled by CL_CTS_ADT_RES_OBJ_RECORD->find via
+    # CTS_WBO_API_READ_REQUESTS. It has no server-side status filter and
+    # generally returns only modifiable requests, so --status R is usually
+    # empty.
+    resp = make_adt_request(
+        f"{_base()}/sap/bc/adt/cts/transports",
+        params={"_action": "FIND", "user": user, "trfunction": "K"},
+        timeout=60,
+    )
+    records = parse_records.parse_request_headers(resp.content)["transports"]
+    if status:
+        records = [t for t in records if (t.get("status") or "").upper() == status.upper()]
+    return _structured("records", {"transports": records}, None, raw=resp.text)
+
+
+# Older releases (observed on ECC) answer a bodyless POST that carries no
+# Content-Type with HTTP 400 contentTypeMissing; S/4HANA 2021 accepts it.
+_BODYLESS_CONTENT_TYPE = "application/vnd.sap.as+xml; charset=UTF-8"
+
+
+def _content_type_missing(exc: AdtHttpError) -> bool:
+    return (exc.status == 400
+            and "contenttypemissing" in re.sub(r"[\s_]", "", str(exc)).lower())
+
+
+def _post_without_body(url: str, params: dict, headers: dict) -> requests.Response:
+    """Bodyless POST (lock/unlock); retried once with a Content-Type if required.
+
+    A 400 means the request was rejected before it ran, so no lock was taken
+    and the retry is safe.
+    """
+    try:
+        return make_adt_request(url, method="POST", params=params, extra_headers=headers)
+    except AdtHttpError as e:
+        if not _content_type_missing(e):
+            raise
+        return make_adt_request(
+            url, method="POST", params=params,
+            extra_headers={**headers, "Content-Type": _BODYLESS_CONTENT_TYPE},
+        )
+
+
+def lock_object(object_uri: str) -> AdtResult:
+    # Verified 2026-09-16 on S/4HANA 2021 / Basis 7.56: enqueue is
+    # POST <object>?_action=LOCK&accessMode=MODIFY with the stateful session
+    # header and the lock.result ASX accept type; the handle comes back as
+    # LOCK_HANDLE in the ASX body (the legacy ?method=lock form is rejected
+    # with 400 "Content type missing" / 415 on this release).
+    try:
+        resp = _post_without_body(
+            f"{_base()}{object_uri}",
+            params={"_action": "LOCK", "accessMode": "MODIFY"},
+            headers={
+                "X-sap-adt-sessiontype": "stateful",
+                "Accept": (
+                    "application/*,application/vnd.sap.as+xml;charset=UTF-8;"
+                    "dataname=com.sap.adt.lock.result"
+                ),
+            },
+        )
+        handle = _extract_lock_handle(resp)
+        if not handle:
+            return AdtResult(text="Lock succeeded but no handle returned by SAP — cannot proceed with write.", is_error=True)
+        return AdtResult(text=handle)
+    except Exception as e:
+        return _err(e)
+
+
+def put_source(
+    object_uri: str,
+    content: str,
+    lock_handle: str,
+    transport: Optional[str] = None,
+) -> AdtResult:
+    # Verified 2026-09-16 on Basis 7.56: the lock handle travels as the
+    # ?lockHandle= QUERY parameter (not the X-sap-adt-lock-handle header),
+    # and a chosen transport is ?corrNr= (legacy name sap-cts-request is
+    # ignored). The PUT is part of the stateful session that owns the lock.
+    try:
+        params: dict = {"lockHandle": lock_handle}
+        if transport:
+            params["corrNr"] = transport
+        make_adt_request(
+            f"{_base()}{object_uri}/source/main",
+            method="PUT",
+            data=content.encode("utf-8"),
+            params=params,
+            extra_headers={
+                "Content-Type": "text/plain; charset=utf-8",
+                "X-sap-adt-sessiontype": "stateful",
+            },
+        )
+        return AdtResult(text="OK")
+    except Exception as e:
+        return _err(e)
+
+
+def unlock_object(object_uri: str, lock_handle: str) -> AdtResult:
+    # Verified 2026-09-16/17 on Basis 7.56: dequeue is
+    # POST <object>?_action=UNLOCK&lockHandle=<handle>. A 200 empty body is
+    # NOT proof of release: from a foreign stateful context (no original
+    # cookie) it is a measured silent no-op. The normal write-source flow
+    # calls this in `finally` within the owning session, and real release
+    # was confirmed by an independent fresh-process re-lock 200.
+    try:
+        _post_without_body(
+            f"{_base()}{object_uri}",
+            params={"_action": "UNLOCK", "lockHandle": lock_handle},
+            headers={"X-sap-adt-sessiontype": "stateful"},
+        )
+        return AdtResult(text="OK")
+    except Exception:
+        return AdtResult(text="unlock error (ignored)", is_error=False)
+
+
+def activate_object(
     object_type: str,
     object_name: str,
     group: Optional[str] = None,
@@ -423,151 +811,84 @@ def syntax_check(
             f'<adtcore:objectReference adtcore:uri="{_xattr(uri)}" adtcore:name="{_xattr(object_name.upper())}"/>'
             '</adtcore:objectReferences>'
         ).encode("utf-8")
+        # Verified 2026-09-16 on Basis 7.56: activation REQUIRES the
+        # ?method=activate query parameter (bare POST /activation -> 400
+        # ExceptionParameterNotFound "Parameter method could not be found").
         resp = make_adt_request(
-            f"{_base()}/sap/bc/adt/abapsource/syntaxcheck",
+            f"{_base()}/sap/bc/adt/activation",
             method="POST",
+            params={"method": "activate", "preauditRequested": "true"},
             data=body,
             extra_headers={
                 "Content-Type": (
-                    "application/vnd.sap.adt.abapsource.syntaxcheckresult+xml; charset=utf-8"
+                    "application/vnd.sap.adt.activation.request+xml; charset=utf-8"
                 )
             },
         )
-        return AdtResult(text=_parse_syntax_check(resp.text))
+        if resp.text and resp.text.strip():
+            errors = _parse_activation_errors(resp.text)
+            if errors:
+                return AdtResult(text="\n".join(errors), is_error=True)
+        return AdtResult(text=f"Activated {object_type.upper()} {object_name.upper()}.")
     except ValueError as e:
-        return AdtResult(text=str(e), is_error=True)
+        return _err(e)
     except Exception as e:
         return _err(e)
 
 
-def get_cds_view(name: str) -> AdtResult:
-    try:
-        return _ok(make_adt_request(
-            f"{_base()}/sap/bc/adt/ddic/ddl/sources/{_enc(name)}/source/main"
-        ))
-    except Exception as e:
-        return _err(e)
-
-
-def get_type_group(name: str) -> AdtResult:
-    try:
-        return _ok(make_adt_request(
-            f"{_base()}/sap/bc/adt/typegroups/groups/{_enc(name)}/source/main"
-        ))
-    except Exception as e:
-        return _err(e)
-
-
-def where_used(
-    object_type: str,
-    object_name: str,
-    max_results: int = 50,
-    group: Optional[str] = None,
+def create_program(
+    program_name: str,
+    description: str,
+    package: str,
+    transport: str = "",
+    program_type: str = "executableProgram",
 ) -> AdtResult:
+    """Create an ABAP program (report) shell.
+
+    Contract from /sap/bc/adt/discovery: the collection
+    /sap/bc/adt/programs/programs declares
+        <app:accept>application/vnd.sap.adt.programs.programs.v2+xml</app:accept>
+    so a POST of that media type creates a member of the collection.
+
+    The transport is passed as the ``corrNr`` query parameter. A local
+    ($TMP) package needs none.
+
+    The created program may have no source yet -- follow up with put_source
+    (the ``write-source`` command) and then activate it.
+    """
+    name = program_name.upper()
     try:
-        uri = get_object_uri(object_type, object_name, group=group)
-        full_uri = f"{_base()}{uri}"
+        body = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<program:abapProgram'
+            ' xmlns:program="http://www.sap.com/adt/programs/programs"'
+            ' xmlns:adtcore="http://www.sap.com/adt/core"'
+            f' adtcore:name="{_xattr(name)}"'
+            ' adtcore:type="PROG/P"'
+            f' adtcore:description="{_xattr(description)}"'
+            f' program:programType="{_xattr(program_type)}">'
+            f'<adtcore:packageRef adtcore:name="{_xattr(package.upper())}"/>'
+            "</program:abapProgram>"
+        ).encode("utf-8")
+        params = {"corrNr": transport} if transport else None
         resp = make_adt_request(
-            f"{_base()}/sap/bc/adt/repository/informationsystem/whereused",
-            params={"uri": full_uri, "maxResults": max_results},
+            f"{_base()}/sap/bc/adt/programs/programs",
+            method="POST",
+            data=body,
+            params=params,
             extra_headers={
-                "Accept": (
-                    "application/vnd.sap.adt.repository.informationsystem.whereused+xml"
-                )
+                "Content-Type": (
+                    "application/vnd.sap.adt.programs.programs.v2+xml; charset=UTF-8"
+                ),
             },
         )
-        items = _parse_where_used(resp.text)
-        return AdtResult(text=json.dumps(items, indent=2))
-    except ValueError as e:
-        return AdtResult(text=str(e), is_error=True)
-    except Exception as e:
-        return _err(e)
-
-
-def run_sql(sql: str, max_rows: int = 100) -> AdtResult:
-    url = f"{_base()}/sap/bc/adt/datapreview/freestyle"
-    try:
-        try:
-            resp = make_adt_request(
-                url,
-                params={"rowNumber": max_rows, "sqlCommand": sql},
-                extra_headers={"Accept": "application/vnd.sap.adt.datapreview.table.v1+xml"},
-            )
-        except requests.HTTPError as e:
-            if e.response is None or e.response.status_code != 405:
-                raise
-            resp = make_adt_request(
-                url,
-                method="POST",
-                params={"rowNumber": max_rows},
-                data=sql.encode("utf-8"),
-                extra_headers={
-                    "Content-Type": "text/plain",
-                    "Accept": "application/vnd.sap.adt.datapreview.table.v1+xml",
-                },
-                timeout=60,
-            )
-        rows = _parse_sql_result(resp.text)
-        return AdtResult(text=json.dumps(rows, indent=2))
-    except Exception as e:
-        return _err(e)
-
-
-def _parse_transports_ecc(xml_text: str, status_filter: str = "") -> list:
-    """Parse the ECC FIND payload: asx:abap > DATA > CTS_REQ_HEADER rows."""
-    if not xml_text or not xml_text.strip():
-        return []
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return []
-
-    items = []
-    for elem in root.iter():
-        if _tag_local(elem) != "CTS_REQ_HEADER":
-            continue
-        get = lambda tag: (elem.findtext(tag) or "").strip()
-        trkorr = get("TRKORR")
-        if not trkorr:
-            continue
-        status = get("TRSTATUS")
-        if status_filter and status.upper() != status_filter.upper():
-            continue
-        items.append({
-            "trkorr": trkorr,
-            "description": get("AS4TEXT"),
-            "status": status,
-            "owner": get("AS4USER"),
-            "target": get("TARSYSTEM"),
-        })
-    return items
-
-
-def list_transports(user: str, status: str = "D") -> AdtResult:
-    platform = _platform()
-    if not platform:
-        return AdtResult(text=f"ERROR: platform not configured. {PLATFORM_HINT}", is_error=True)
-    try:
-        if platform == PLATFORM_ECC:
-            # ECC exposes only /cts/transports over HTTP; listing is the FIND
-            # action on it. It cannot filter by status server-side, so the
-            # status filter is applied to the parsed rows.
-            resp = make_adt_request(
-                f"{_base()}/sap/bc/adt/cts/transports",
-                params={"_action": "FIND", "user": user, "trfunction": "K"},
-                timeout=60,
-            )
-            items = _parse_transports_ecc(resp.text, status_filter=status)
-        else:
-            resp = make_adt_request(
-                f"{_base()}/sap/bc/adt/cts/transportrequests",
-                # requestStatus must be sent server-side: without it ADT returns
-                # only the released worklist, so a client-side "D" filter can
-                # never match. D = modifiable, R = released.
-                params={"user": user, "requestStatus": status},
-            )
-            items = _parse_transports(resp.text, status_filter=status)
-        return AdtResult(text=json.dumps(items, indent=2))
+        return AdtResult(
+            text=(f"Created PROGRAM {name} in package {package.upper()} "
+                  f"(HTTP {resp.status_code}). Check the source with get-program: "
+                  f"some backends (ECC) seed a header comment plus a REPORT "
+                  f"statement and are activatable as-is, others leave it empty - "
+                  f"use write-source to load it, then activate.")
+        )
     except Exception as e:
         return _err(e)
 
@@ -610,7 +931,7 @@ def set_program_logical_database(
     if "<program:logicalDatabase" in doc:
         new_doc = re.sub(
             r"<program:logicalDatabase>.*?</program:logicalDatabase>",
-            block, doc, flags=re.S,
+            lambda _m: block, doc, flags=re.S,
         )
     elif not logical_database:
         return AdtResult(
@@ -644,234 +965,91 @@ def set_program_logical_database(
         unlock_object(uri, handle)
 
 
-def create_program(
-    program_name: str,
-    description: str,
+def create_transport(
     package: str,
-    transport: str = "",
-    program_type: str = "executableProgram",
+    description: str,
+    ref: str = "",
 ) -> AdtResult:
-    """Create an ABAP program (report) shell.
-
-    Contract from /sap/bc/adt/discovery: the collection
-    /sap/bc/adt/programs/programs declares
-        <app:accept>application/vnd.sap.adt.programs.programs.v2+xml</app:accept>
-    so a POST of that media type creates a member of the collection.
-
-    The transport is passed as the ``corrNr`` query parameter. A local
-    ($TMP) package needs none.
-
-    The created program has no source yet -- follow up with put_source
-    (the ``write-source`` command) and then activate it.
-    """
-    name = program_name.upper()
+    # Verified 2026-09-17 on S/4HANA 2021 / Basis 7.56: request creation is
+    # the ABAP-serialized CreateCorrectionRequest (ASX body of
+    # DEVCLASS/REQUEST_TEXT/REF/OPERATION), not a CTS resource document.
+    # The legacy cts:transportRequest+xml shape returns 400
+    # ExceptionDataTypeNotFound ("No data type found in content type").
+    # DEVCLASS + REF is the only measured working combination (both
+    # required); "$TMP" creates a local, non-releasable request; the body
+    # is text/plain "/com.sap.cts/object_record/<TRKORR>".
     try:
+        package = (package or "").strip()
+        description = (description or "").strip()
+        ref = (ref or "").strip()
+        if _platform() == PLATFORM_ECC:
+            return _create_transport_ecc(package, description)
+        if not package or not description or not ref:
+            raise ValueError(
+                "create-transport requires --package, --description and --ref"
+            )
+        if not ref.startswith("/sap/bc/adt/"):
+            raise ValueError(
+                f"--ref must be a relative ADT object URI (got {ref!r})"
+            )
         body = (
             '<?xml version="1.0" encoding="UTF-8"?>'
-            '<program:abapProgram'
-            ' xmlns:program="http://www.sap.com/adt/programs/programs"'
-            ' xmlns:adtcore="http://www.sap.com/adt/core"'
-            f' adtcore:name="{_xattr(name)}"'
-            ' adtcore:type="PROG/P"'
-            f' adtcore:description="{_xattr(description)}"'
-            f' program:programType="{_xattr(program_type)}">'
-            f'<adtcore:packageRef adtcore:name="{_xattr(package.upper())}"/>'
-            "</program:abapProgram>"
+            '<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">'
+            "<asx:values><DATA>"
+            f"<DEVCLASS>{_xattr(package)}</DEVCLASS>"
+            f"<REQUEST_TEXT>{_xattr(description)}</REQUEST_TEXT>"
+            f"<REF>{_xattr(ref)}</REF>"
+            "<OPERATION>I</OPERATION>"
+            "</DATA></asx:values>"
+            "</asx:abap>"
         ).encode("utf-8")
-        params = {"corrNr": transport} if transport else None
         resp = make_adt_request(
-            f"{_base()}/sap/bc/adt/programs/programs",
+            f"{_base()}/sap/bc/adt/cts/transports",
             method="POST",
             data=body,
-            params=params,
             extra_headers={
+                "Accept": "text/plain",
                 "Content-Type": (
-                    "application/vnd.sap.adt.programs.programs.v2+xml; charset=UTF-8"
+                    "application/vnd.sap.as+xml; charset=UTF-8; "
+                    "dataname=com.sap.adt.CreateCorrectionRequest"
                 ),
             },
         )
-        return AdtResult(
-            text=(f"Created PROGRAM {name} in package {package.upper()} "
-                  f"(HTTP {resp.status_code}). Check the source with get-program: "
-                  f"some backends (ECC) seed a header comment plus a REPORT "
-                  f"statement and are activatable as-is, others leave it empty - "
-                  f"use write-source to load it, then activate.")
-        )
+        trkorr = (resp.text or "").strip().rstrip("/").rsplit("/", 1)[-1]
+        if not _valid_trkorr(trkorr):
+            return _err(ValueError(
+                f"Transport creation returned an unreadable TRKORR: "
+                f"{(resp.text or '').strip()[:120]!r}"
+            ))
+        return AdtResult(text=f"Created transport: {trkorr}")
     except Exception as e:
         return _err(e)
 
 
-def lock_object(object_uri: str) -> AdtResult:
-    try:
-        resp = make_adt_request(
-            f"{_base()}{object_uri}",
-            method="POST",
-            # ADT lock contract: _action=LOCK&accessMode=MODIFY. A bodyless
-            # POST still needs a Content-Type or SAP answers HTTP 400
-            # contentTypeMissing. The handle comes back in <LOCK_HANDLE>.
-            params={"_action": "LOCK", "accessMode": "MODIFY"},
-            extra_headers={
-                "X-sap-adt-sessiontype": "stateful",
-                "Accept": (
-                    "application/vnd.sap.as+xml;charset=UTF-8;"
-                    "dataname=com.sap.adt.lock.Result"
-                ),
-                "Content-Type": "application/vnd.sap.as+xml; charset=UTF-8",
-            },
-        )
-        handle = _extract_lock_handle(resp)
-        if not handle:
-            return AdtResult(text="Lock succeeded but no handle returned by SAP — cannot proceed with write.", is_error=True)
-        return AdtResult(text=handle)
-    except Exception as e:
-        return _err(e)
+def _create_transport_ecc(package: str, description: str) -> AdtResult:
+    """Create a transport request on ECC (verified on an ECC 6.0 backend).
 
+    Same resource as S/4HANA. ECC's CL_CTS_ADT_RES_OBJ_RECORD->post reads a
+    SADT_CREATE_CORR_REQUEST and calls TR_INSERT_REQUEST_WITH_TASKS; the
+    verified body carries only DEVCLASS and REQUEST_TEXT. Consequences for
+    the caller:
 
-def put_source(
-    object_uri: str,
-    content: str,
-    lock_handle: str,
-    transport: Optional[str] = None,
-) -> AdtResult:
-    try:
-        extra: dict = {
-            "Content-Type": "text/plain; charset=utf-8",
-        }
-        # ADT takes BOTH the lock handle and the transport as query
-        # parameters on the source PUT:
-        #   lockHandle - passing it only as the X-sap-adt-lock-handle header
-        #                yields HTTP 400 ExceptionParameterNotFound
-        #   corrNr     - the transport request; the older "sap-cts-request"
-        #                name fails the same way
-        params: dict = {"lockHandle": lock_handle}
-        if transport:
-            params["corrNr"] = transport
-        make_adt_request(
-            f"{_base()}{object_uri}/source/main",
-            method="PUT",
-            data=content.encode("utf-8"),
-            params=params,
-            extra_headers=extra,
-        )
-        return AdtResult(text="OK")
-    except Exception as e:
-        return _err(e)
-
-
-def unlock_object(object_uri: str, lock_handle: str) -> AdtResult:
-    try:
-        make_adt_request(
-            f"{_base()}{object_uri}",
-            method="POST",
-            params={"_action": "UNLOCK", "lockHandle": lock_handle},
-            extra_headers={
-                "X-sap-adt-sessiontype": "stateful",
-                "Content-Type": "application/vnd.sap.as+xml; charset=UTF-8",
-            },
-        )
-        return AdtResult(text="OK")
-    except Exception:
-        return AdtResult(text="unlock error (ignored)", is_error=False)
-
-
-def activate_object(
-    object_type: str,
-    object_name: str,
-    group: Optional[str] = None,
-) -> AdtResult:
-    try:
-        uri = get_object_uri(object_type, object_name, group=group)
-        body = (
-            '<?xml version="1.0" encoding="utf-8"?>'
-            '<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">'
-            f'<adtcore:objectReference adtcore:uri="{_xattr(uri)}" adtcore:name="{_xattr(object_name.upper())}"/>'
-            '</adtcore:objectReferences>'
-        ).encode("utf-8")
-        resp = make_adt_request(
-            f"{_base()}/sap/bc/adt/activation",
-            method="POST",
-            data=body,
-            # The activation resource requires method=activate; without it
-            # SAP answers HTTP 400 ExceptionParameterNotFound for "method".
-            params={"method": "activate", "preauditRequested": "true"},
-            extra_headers={
-                "Content-Type": (
-                    "application/vnd.sap.adt.activation.request+xml; charset=utf-8"
-                )
-            },
-        )
-        if resp.text and resp.text.strip():
-            errors = _parse_activation_errors(resp.text)
-            if errors:
-                return AdtResult(text="\n".join(errors), is_error=True)
-        return AdtResult(text=f"Activated {object_type.upper()} {object_name.upper()}.")
-    except ValueError as e:
-        return AdtResult(text=str(e), is_error=True)
-    except Exception as e:
-        return _err(e)
-
-
-_TRKORR_RE = re.compile(r"[A-Z][A-Z0-9]{2}K[0-9]{6}")
-
-
-def _extract_trkorr(resp) -> str:
-    """Pull the transport number from a Location header, else from the body."""
-    location = resp.headers.get("Location", "")
-    if location:
-        candidate = location.rstrip("/").rsplit("/", 1)[-1]
-        if _TRKORR_RE.fullmatch(candidate):
-            return candidate
-    match = _TRKORR_RE.search(resp.text or "")
-    return match.group(0) if match else ""
-
-
-def list_transport_targets() -> list:
-    """Valid transport targets for this system, from the ADT value help.
-
-    S/4HANA only. On ECC the target is not chosen by the caller at all - the
-    backend derives it from the package's transport layer - so this returns [].
+      * no REF is sent (--ref is not needed on ECC);
+      * the target system is derived from the package (TR_DEVCLASS_GET +
+        TR_GET_TRANSPORT_TARGET, falling back to LOCAL), so the package is
+        mandatory and an unknown one fails with HTTP 500;
+      * the request type is hardcoded to K (Workbench).
     """
-    if _platform() == PLATFORM_ECC:
-        return []
-    resp = make_adt_request(
-        f"{_base()}/sap/bc/adt/cts/transportrequests/valuehelp/target",
-        params={"maxItemCount": "50"},
-    )
-    root = ET.fromstring(resp.text)
-    return [e.text or "" for e in root.iter() if _tag_local(e) == "name"]
-
-
-def _create_transport_ecc(description: str, package: str) -> AdtResult:
-    """Create a transport request on ECC.
-
-    ECC registers only /cts/transports and /cts/transportchecks under
-    /sap/bc/adt (see CL_CTS_ADT_RES_APP->register_resources, which returns
-    early on the HTTP branch). POSTing to /cts/transports runs
-    CL_CTS_ADT_RES_OBJ_RECORD->post, which reads a SADT_CREATE_CORR_REQUEST
-    and calls TR_INSERT_REQUEST_WITH_TASKS.
-
-    Two consequences for the caller:
-      * the target system is NOT passed - the backend derives it from the
-        package via TR_DEVCLASS_GET + TR_GET_TRANSPORT_TARGET, so the package
-        is mandatory here;
-      * the request type is hardcoded to 'K' (Workbench).
-
-    The response body is plain text: a URI whose last segment is the number.
-    """
-    if not package:
-        return AdtResult(
-            text=("ERROR: --package is required on ECC. The backend derives the "
-                  "transport target from the package's transport layer, so it "
-                  "cannot create the request without one."),
-            is_error=True,
-        )
+    if not package or not description:
+        raise ValueError("create-transport requires --package and --description")
     body = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">'
         "<asx:values><DATA>"
-        f"<DEVCLASS>{_xtext(package)}</DEVCLASS>"
-        f"<REQUEST_TEXT>{_xtext(description)}</REQUEST_TEXT>"
-        "</DATA></asx:values></asx:abap>"
+        f"<DEVCLASS>{_xattr(package)}</DEVCLASS>"
+        f"<REQUEST_TEXT>{_xattr(description)}</REQUEST_TEXT>"
+        "</DATA></asx:values>"
+        "</asx:abap>"
     ).encode("utf-8")
     resp = make_adt_request(
         f"{_base()}/sap/bc/adt/cts/transports",
@@ -885,96 +1063,142 @@ def _create_transport_ecc(description: str, package: str) -> AdtResult:
         },
         timeout=60,
     )
-    trkorr = _extract_trkorr(resp)
-    if not trkorr:
-        return AdtResult(
-            text=("Transport POST returned no parseable request number. "
-                  f"Status {resp.status_code}. Body: {(resp.text or '')[:300]}"),
-            is_error=True,
-        )
+    trkorr = (resp.text or "").strip().rstrip("/").rsplit("/", 1)[-1]
+    if not _valid_trkorr(trkorr):
+        return _err(ValueError(
+            f"Transport creation returned an unreadable TRKORR: "
+            f"{(resp.text or '').strip()[:120]!r}"
+        ))
     return AdtResult(text=f"Created transport: {trkorr}")
 
 
-def create_transport(
-    description: str,
-    category: str = "Workbench",
-    username: str = "",
-    target: str = "",
-    package: str = "",
-) -> AdtResult:
-    """Create a transport request via the ADT transport organizer.
+# The /cts/transports/{requestnumber} URI template is registered only on the
+# non-HTTP branch of CL_CTS_ADT_RES_APP->register_resources, whose base path
+# (/sap/bc/cts) has no ICF node, and /cts/transportrequests does not exist on
+# ECC at all. So no HTTP URL on ECC reaches a release handler.
+ECC_RELEASE_UNSUPPORTED = (
+    "release-transport is not available over ADT on ECC: the backend does not "
+    "expose a release endpoint on the HTTP branch. Release the request in "
+    "SE01/SE09 instead."
+)
 
-    S/4HANA contract, taken from /sap/bc/adt/discovery, where the collection
-    /sap/bc/adt/cts/transportrequests declares
-        <app:accept>application/vnd.sap.adt.transportorganizer.v1+xml</app:accept>
-    and the POST body must be rooted at {http://www.sap.com/cts/adt/tm}root.
-    There ``target`` is the transport target system (see
-    list_transport_targets) and ``package`` is ignored.
 
-    ECC uses a different resource entirely - see _create_transport_ecc, where
-    ``package`` is required and ``target``/``category`` do not apply.
-    """
-    platform = _platform()
-    if not platform:
-        return AdtResult(text=f"ERROR: platform not configured. {PLATFORM_HINT}", is_error=True)
+def _valid_trkorr(trkorr: str) -> bool:
+    t = (trkorr or "").upper()
+    return len(t) == 10 and t[0].isalpha() and t[1:].isalnum()
+
+
+def transport_preflight(trkorr: str) -> tuple[AdtResult, dict | None]:
+    """Read a single request: existence, owner, current status."""
+    if not _valid_trkorr(trkorr):
+        return _err(ValueError(f"Invalid transport number: {trkorr}")), None
     try:
-        if platform == PLATFORM_ECC:
-            return _create_transport_ecc(description, package)
-
-        request_type = "W" if category.upper().startswith("CUST") else "K"
-        body = (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            '<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm"'
-            ' tm:useraction="newrequest">'
-            f'<tm:request tm:desc="{_xattr(description)}"'
-            f' tm:type="{request_type}"'
-            f' tm:target="{_xattr(target)}"'
-            ' tm:cts_project="">'
-            f'<tm:task tm:owner="{_xattr(username)}"/>'
-            "</tm:request>"
-            "</tm:root>"
-        ).encode("utf-8")
         resp = make_adt_request(
-            f"{_base()}/sap/bc/adt/cts/transportrequests",
-            method="POST",
-            data=body,
-            extra_headers={
-                "Content-Type": "application/vnd.sap.adt.transportorganizer.v1+xml",
+            f"{_base()}/sap/bc/adt/cts/transportrequests/{_enc(trkorr.upper())}",
+            extra_headers={"Accept":
+                           "application/vnd.sap.adt.transportorganizer.v1+xml"},
+        )
+        parsed = parse_records.parse_single_request(resp.content)
+        return _structured("records", parsed, {"type": "transport", "name": trkorr.upper()},
+                           raw=resp.text), parsed["transport"]
+    except AdtHttpError as e:
+        # The transport organizer reports a missing request as HTTP 400
+        # ADT_TM_COMMON_EXCEPTION "... does not exist in system".
+        if e.status == 400 and "does not exist in system" in str(e).lower():
+            return AdtResult(text=str(e), is_error=True,
+                             error_code=errors.OBJECT_NOT_FOUND,
+                             http_status=404, hint=errors.DEFAULT_HINTS[errors.OBJECT_NOT_FOUND]), None
+        return _err(e), None
+    except Exception as e:
+        return _err(e), None
+
+
+def release_transport(trkorr: str, *, dry_run: bool = False, progress=None,
+                      poll_interval: float = 2.0, timeout: float = 120.0,
+                      sleep=None) -> AdtResult:
+    """Release a request (newreleasejobs) and verify TRSTATUS readback.
+
+    Preflight → POST release jobs → poll the single-request resource until
+    status R. D after the timeout is a definite rejection; an unknown final
+    state is UNVERIFIED (never re-release automatically).
+    """
+    import time as _time
+    sleep = sleep or _time.sleep
+    if _platform() == PLATFORM_ECC:
+        return _err(ValueError(ECC_RELEASE_UNSUPPORTED))
+    pre, request = transport_preflight(trkorr)
+    if pre.is_error:
+        return pre
+    if dry_run:
+        pre.meta = {
+            "dry_run": True,
+            "release_possible": request["status"] == "D",
+            "checks": {
+                "exists": True,
+                "owner": request["owner"],
+                "status": request["status"],
+                "modifiable": request["status"] == "D",
             },
-        )
-        trkorr = _extract_trkorr(resp)
-        if not trkorr:
-            body_snippet = (resp.text or "")[:300]
-            return AdtResult(
-                text=("Transport POST returned no parseable request number. "
-                      f"Status {resp.status_code}. Body: {body_snippet}"),
-                is_error=True,
-            )
-        return AdtResult(text=f"Created transport: {trkorr}")
-    except Exception as e:
-        return _err(e)
+        }
+        return pre
 
+    if request["status"] == "R":
+        pre.meta = {"released": True, "already_released": True}
+        return pre
 
-def release_transport(trkorr: str) -> AdtResult:
-    platform = _platform()
-    if not platform:
-        return AdtResult(text=f"ERROR: platform not configured. {PLATFORM_HINT}", is_error=True)
-    if platform == PLATFORM_ECC:
-        # The /cts/transports/{requestnumber} URI template is registered only
-        # on the non-HTTP branch of CL_CTS_ADT_RES_APP->register_resources, and
-        # that branch's base path (/sap/bc/cts) has no ICF node. So no HTTP URL
-        # on ECC reaches the release handler.
-        return AdtResult(
-            text=("ERROR: release-transport is not available over ADT on ECC - the "
-                  "backend does not expose a release endpoint on the HTTP branch. "
-                  "Release the request in SE01/SE09 instead."),
-            is_error=True,
-        )
     try:
-        make_adt_request(
-            f"{_base()}/sap/bc/adt/cts/transports/{_enc(trkorr)}?action=release",
+        resp = make_adt_request(
+            f"{_base()}/sap/bc/adt/cts/transportrequests/"
+            f"{_enc(trkorr.upper())}/newreleasejobs",
             method="POST",
+            extra_headers={"Accept": "application/*"},
+            timeout=300,
         )
-        return AdtResult(text=f"Released transport: {trkorr}")
+        report = parse_records.parse_release_report(resp.content)
+        failed_reports = [
+            r for r in report["release_reports"]
+            if (r.get("status") or "").lower() in ("abortrelapifail", "aborted")
+            or any((m.get("severity") or "").upper() == "E" for m in r.get("messages", []))
+        ]
+        if failed_reports:
+            msgs = "; ".join(
+                m["text"] for r in failed_reports for m in r["messages"] if m.get("text")
+            )
+            return AdtResult(
+                text=f"Transport {trkorr.upper()} release rejected: {msgs or 'check failure'}",
+                is_error=True, error_code=errors.RELEASE_REJECTED,
+            )
     except Exception as e:
         return _err(e)
+
+    # Release jobs run asynchronously: read back TRSTATUS with a hard timeout.
+    deadline = _time.monotonic() + timeout
+    attempt = 0
+    last_status = request["status"]
+    while _time.monotonic() < deadline:
+        attempt += 1
+        if progress:
+            progress(f"Release job submitted; reading status (attempt {attempt})…")
+        sleep(poll_interval)
+        check, current = transport_preflight(trkorr)
+        if check.is_error:
+            # Readback failed: the release itself may still be running.
+            return AdtResult(
+                text=(f"Transport {trkorr.upper()} release requested, but status "
+                      f"readback failed after {attempt} attempts; status unknown."),
+                is_error=True, error_code=errors.RELEASE_UNVERIFIED,
+            )
+        last_status = current["status"]
+        if last_status == "R":
+            check.meta = {"released": True, "poll_attempts": attempt}
+            return check
+    if last_status == "D":
+        return AdtResult(
+            text=f"Transport {trkorr.upper()} is still modifiable (D) after {timeout:.0f}s.",
+            is_error=True, error_code=errors.RELEASE_REJECTED,
+        )
+    return AdtResult(
+        text=(f"Transport {trkorr.upper()} release requested; final status "
+              f"{last_status or 'unknown'} after {timeout:.0f}s."),
+        is_error=True, error_code=errors.RELEASE_UNVERIFIED,
+    )

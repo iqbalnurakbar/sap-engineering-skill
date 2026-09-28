@@ -1,479 +1,159 @@
 ---
 name: sap-adt-cli
-description: "Read and write ABAP source code and metadata from SAP systems via the ADT REST API.
-  Use when the user asks to read, view, analyze, modify, write, or activate ABAP programs,
-  classes, function modules, function groups, interfaces, includes, CDS views, DDIC tables,
-  structures, data elements, domains, type groups, transactions, or packages.
-  Also handles: syntax checking, where-used analysis, Open SQL data preview,
-  transport request management (list, create, release), and searching for ABAP objects by name.
-  Write and transport operations require explicit capability flags enabled in config,
-  AND require user confirmation for every individual operation — confirmation is one-time
-  and never reused across operations in the same session.
-  On first use, guides the user through SAP credential setup interactively."
+description: "Read/write ABAP source and metadata via SAP ADT REST API: programs, classes,
+  function modules/groups, interfaces, includes, CDS views, DDIC tables/structures,
+  data elements/domains, type groups, transactions, packages, search, where-used,
+  syntax check, Open SQL preview, program creation, and transport requests
+  (list/create/release) on S/4HANA and ECC.
+  Write and transport operations each require a global capability flag AND a
+  per-operation [y/N] confirmation that is never cached or reused across operations.
+  On first use, configure credentials interactively (see references/credentials.md)."
 ---
 
-# SAP ADT CLI Skill
+# SAP ADT CLI
 
-Read ABAP source code and metadata from SAP via `scripts/sap_adt_cli.py`.
-
-## CLI Location
-
-The CLI is `scripts/sap_adt_cli.py` inside this skill's directory.
-Resolve the skill directory at runtime using the skill tool's path, then build the CLI path:
+CLI: `scripts/sap_adt_cli.py` in this skill directory. First run auto-installs
+`click`/`requests`/`urllib3`. Always run `status` first to check the profile, switches and platform.
 
 ```bash
 SKILL_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]:-$0}")")"
 SAP_CLI="$SKILL_DIR/scripts/sap_adt_cli.py"
+python3 "$SAP_CLI" status
 python3 "$SAP_CLI" <command> [args]
+# Windows: python "%USERPROFILE%\.agents\skills\sap-adt-cli\scripts\sap_adt_cli.py"
 ```
 
-If you already know the absolute path to the skill directory (e.g. from the skill loader), use it directly:
+Unconfigured → `CONFIG_MISSING` (exit 2). First-use credential collection and
+non-interactive `configure`: read **references/credentials.md**.
+Multiple systems/profiles (`--profile`, `SAP_PROFILE`, PRD danger of global flags):
+read **references/profiles.md**.
 
-```bash
-# Linux / macOS — skill installed via clone + symlink
-SAP_CLI="$HOME/.agents/skills/sap-adt-cli/scripts/sap_adt_cli.py"
-python3 "$SAP_CLI" <command> [args]
+## Output contract
+
+Every read command prints a JSON envelope (source commands print plain ABAP by default):
+
+```json
+{ "ok": true, "format_version": 1, "command": "get-table", "profile": "dev",
+  "object": {"type": "table", "name": "VBAK"},
+  "kind": "fields", "data": { }, "meta": {"row_count": 0} }
 ```
 
-```powershell
-# Windows — skill installed via setup-opencode-abap-cli.bat (Junction)
-$SAP_CLI = "$env:USERPROFILE\.agents\skills\sap-adt-cli\scripts\sap_adt_cli.py"
-python "$SAP_CLI" <command> [args]
-```
-
-First run auto-installs `click`, `requests`, and `urllib3`. All source code output goes to stdout. Errors go to stderr with exit code 1.
-
-## CRITICAL: Credential Check Before First Command
-
-**Always run this before the first ABAP query in a session:**
-
-```bash
-python3 "$SAP_CLI" status
-```
-
-### Credentials configured → proceed
-
-Output example:
-```
-URL:             https://my-sap.example.com:8000
-Username:        DEVELOPER
-Client:          100
-Language:        EN
-SSL:             verify
-Write mode:      DISABLED
-Transport write: DISABLED
-Platform:        NOT SET (required for transport commands)
-Config source:   /home/user/.sap-adt-cli/config.json
-```
-
-### Credentials NOT configured → collect and save non-interactively
-
-You will see:
-```
-Not configured. Run: python3 sap_adt_cli.py configure
-```
-
-Or any ABAP command will print to stderr:
-```
-SAP credentials not configured.
-...
-```
-
-**Collect all credentials in a SINGLE `question` tool call** — pass all fields as one array.
-Do NOT ask one field at a time; multiple sequential calls create separate UI tabs that can
-cause earlier answers to be overwritten before all values are saved.
-
-Fields to ask (all at once):
-
-```
-1. SAP System URL   — e.g. https://my-sap.example.com:8000  (include port)
-2. SAP Username     — dialog user, e.g. DEVELOPER
-3. SAP Password     — SAP logon password
-4. SAP Client       — 3-digit number, e.g. 100
-5. Skip SSL check?  — yes/no  (yes = self-signed / internal systems, no = production with valid cert)
-```
-
-**After receiving all answers from the single question call, save with one configure command:**
-
-```bash
-python3 "$SAP_CLI" configure \
-  --url      "https://my-sap.example.com:8000" \
-  --username "DEVELOPER" \
-  --client   "100" \
-  --language "EN"
-  # add --no-verify-ssl if user said yes to skipping SSL
-```
-
-Pass the password via environment variable to avoid shell history exposure:
-
-```bash
-SAP_PASSWORD="mysecret" python3 "$SAP_CLI" configure \
-  --url "https://my-sap.example.com:8000" \
-  --username "DEVELOPER" \
-  --client "100"
-```
-
-Then verify:
-
-```bash
-python3 "$SAP_CLI" status
-```
-
-Credentials are saved to `~/.sap-adt-cli/config.json` (permissions 0600) and reused in all future sessions.
-
-**To enable write or transport capabilities:**
-
-```bash
-# Interactive — answer prompts for write/transport flags
-python3 "$SAP_CLI" configure
-
-# Non-interactive — pass flags explicitly
-SAP_PASSWORD="mysecret" python3 "$SAP_CLI" configure \
-  --url "https://sap-dev.example.com:44300" \
-  --username "DEVELOPER" \
-  --client "400" \
-  --allow-write \
-  --no-allow-transport \
-  --platform ecc
-```
-
-| Flag | Default | Controls |
-|------|---------|---------|
-| `--allow-write` / `--no-allow-write` | disabled | `write-source`, `activate` |
-| `--allow-transport` / `--no-allow-transport` | disabled | `create-transport`, `release-transport` |
-| `--platform s4\|ecc` | unset | all three transport commands — **ask the user, never infer** |
-
-> **One-time confirmation rule (CRITICAL for agent workflows):**
-> Even when capability flags are enabled, every write/create/release operation
-> requires an interactive change preview and explicit `[y/N]` confirmation.
-> This confirmation applies to the **current operation only** and is immediately
-> discarded after use — it is NEVER stored, cached, or reused.
-> In the same conversation, if the user asks for another write/create/release
-> operation, confirmation must be obtained again from scratch.
-> Use `--yes` only when the caller has explicit out-of-band authorization
-> (e.g. a trusted CI pipeline). Never pass `--yes` on behalf of the user
-> based on a previous confirmation in the same conversation.
-
-> **Ask which backend BEFORE any transport command (CRITICAL):**
-> ADT does not expose the Change & Transport System at the same URLs on every
-> release, so `list-transports`, `create-transport` and `release-transport`
-> cannot run until the platform is known. **Ask the user whether the system is
-> S/4HANA or ECC** - do not infer it from the hostname, the SID, the package
-> naming, or the fact that a previous system was one or the other. Then save it:
->
-> ```bash
-> python3 "$SAP_CLI" configure --platform s4     # S/4HANA
-> python3 "$SAP_CLI" configure --platform ecc    # ECC / NetWeaver
-> ```
->
-> `configure --platform` preserves every other saved setting, so it is safe to
-> run on an already-configured system. `status` shows the current value. The
-> transport commands abort with an explanatory error while it is unset.
->
-> The two platforms need different options for `create-transport`:
->
-> | | S/4HANA | ECC |
-> |---|---|---|
-> | required | `--target` (never defaulted - ask) | `--package` (never inferred - ask) |
-> | target system | chosen by the user | derived by the backend from the package |
-> | `--category` | Workbench or Customizing | always Workbench (backend fixes it) |
-> | `release-transport` | supported | **not available** - use SE01/SE09 |
-
-> **Ask, do not infer, before an object-creating write (CRITICAL):**
-> `create-transport` and `create-program` take values that belong to the user,
-> not to the agent. If the user has not supplied one, **ask** — batched into a
-> single question, not one per turn — before running anything:
->
-> | Command | Must come from the user |
-> |---|---|
-> | `create-program` | package (DEVCLASS), description/title, transport, program type if not a plain report |
-> | `create-transport` (S/4HANA) | description, category (Workbench vs Customizing), **target system** |
-> | `create-transport` (ECC) | description, **package** - the target is derived from it |
->
-> Do not copy a package from a similarly named object, and do not invent a
-> transport description from a naming convention. A wrong package fixes the
-> transport layer and can strand the object; a wrong description is what a
-> reviewer reads months later. Reading the system to *offer* informed choices
-> (candidate packages from `TADIR`, targets from `/valuehelp/target`) is
-> encouraged — the user still picks.
->
-> The transport **target system is never defaulted, not even when
-> `/valuehelp/target` returns exactly one candidate** — ask. The value help
-> exists to present the choice, not to make it. `create-transport` aborts
-> without `--target` and prints the candidates for you to offer.
-
-> **Security note:** inform the user that credentials stored in SKILL-local `.env`
-> or `~/.sap-adt-cli/config.json` are plain text. The JSON config file is
-> protected with `0600` permissions but is not encrypted.
-
-**Alternative A — SKILL-local `.env`** (recommended for per-skill isolation):
-
-```bash
-cp "$(dirname "$SAP_CLI")/../.env.example" "$(dirname "$SAP_CLI")/../.env"
-# edit .env and fill SAP_URL, SAP_USERNAME, SAP_PASSWORD, SAP_CLIENT
-python3 "$SAP_CLI" status
-```
-
-**Alternative B — env vars per invocation** (no file written, useful for one-off sessions):
-
-```bash
-SAP_URL="https://..." SAP_USERNAME="USER" SAP_PASSWORD="pass" SAP_CLIENT="100" python3 "$SAP_CLI" status
-```
-
-Credential precedence is: process env vars > SKILL-local `.env` > `~/.sap-adt-cli/config.json`.
-Capability flags map to `SAP_ALLOW_WRITE` and `SAP_ALLOW_TRANSPORT`; keep both `0`
-unless the user explicitly authorizes write or transport operations.
-
----
-
-## Commands Quick Reference
-
-| Command | Usage | Description |
-|---------|-------|-------------|
-| `configure` | `configure` | Interactive credential setup wizard |
-| `status` | `status` | Show current connection config |
-| `get-program` | `get-program <NAME>` | ABAP program (report) source code |
-| `get-class` | `get-class <NAME>` | ABAP class source code |
-| `get-function-group` | `get-function-group <NAME>` | Function group top-include source |
-| `get-function` | `get-function <NAME> --group <FG>` | Function module source code |
-| `get-include` | `get-include <NAME>` | ABAP include source code |
-| `get-interface` | `get-interface <NAME>` | ABAP interface source code |
-| `get-table` | `get-table <NAME>` | DDIC table field definitions |
-| `get-structure` | `get-structure <NAME>` | DDIC structure definition |
-| `get-type-info` | `get-type-info <NAME>` | Domain or data element (tries domain first) |
-| `get-package` | `get-package <NAME>` | Package object list → JSON array |
-| `get-transaction` | `get-transaction <NAME>` | Transaction properties/package info |
-| `search-object` | `search-object <QUERY> [--max-results N]` | Quick object search (`*` wildcard) |
-| `syntax-check` | `syntax-check <TYPE> <NAME> [--group <FG>]` | ABAP syntax check — no system change |
-| `get-cds-view` | `get-cds-view <NAME>` | CDS View DDL source code |
-| `get-type-group` | `get-type-group <NAME>` | ABAP type group (TYPE POOL) source |
-| `create-program` | `create-program <NAME> --description "<D>" --package <PKG> [--transport <TR>]` | Create an empty program shell *(allow_write + confirm each time)* |
-| `write-source` | `write-source <TYPE> <NAME> --file <PATH>` | Write source code *(allow_write + confirm each time)* |
-| `activate` | `activate <TYPE> <NAME>` | Activate ABAP object *(allow_write + confirm each time)* |
-| `where-used` | `where-used <TYPE> <NAME> [--max-results N]` | Where-used list → JSON array |
-| `run-sql`           | `run-sql "<SQL>" [--max-rows N]`               | Open SQL SELECT → JSON; DML statements are blocked      |
-| `list-transports` | `list-transports [--user U] [--status D\|R]` | List transport requests → JSON *(needs `platform`)* |
-| `create-transport` | S/4: `create-transport --description "<D>" --target <SYS>`<br>ECC: `create-transport --description "<D>" --package <PKG>` | Create transport request *(allow_transport + `platform` + confirm each time)* |
-| `release-transport` | `release-transport <TRKORR> [--yes]` | Release transport — irreversible *(S/4HANA only; not available on ECC)* |
-
----
-
-## Usage Examples
-
-```bash
-SAP_CLI="<skill_dir>/scripts/sap_adt_cli.py"
-
-# Source code
-python3 "$SAP_CLI" get-program SAPMV45A
-python3 "$SAP_CLI" get-class ZCL_MY_CLASS
-python3 "$SAP_CLI" get-function BAPI_SALESORDER_CREATEFROMDAT2 --group BAPI_SD_SALESORDER
-python3 "$SAP_CLI" get-include MV45AFZZ
-python3 "$SAP_CLI" get-interface ZIF_MY_INTERFACE
-
-# Dictionary
-python3 "$SAP_CLI" get-table VBAK
-python3 "$SAP_CLI" get-structure VBAKKOM
-python3 "$SAP_CLI" get-type-info MATNR
-
-# Discovery
-python3 "$SAP_CLI" search-object "ZCL_*" --max-results 20
-python3 "$SAP_CLI" get-package ZMYPACKAGE
-python3 "$SAP_CLI" get-transaction VA01
-
-# CDS View & Type Group (read-only)
-python3 "$SAP_CLI" get-cds-view ZI_INVENTORY_POSITION
-python3 "$SAP_CLI" get-type-group ICON
-
-# Write & activate (requires allow_write + confirmation each time)
-python3 "$SAP_CLI" write-source class ZCL_MY_CLASS --file /tmp/zcl.abap
-python3 "$SAP_CLI" write-source class ZCL_MY_CLASS --file /tmp/zcl.abap --activate
-cat updated.abap | python3 "$SAP_CLI" write-source class ZCL_MY_CLASS --file -
-python3 "$SAP_CLI" write-source class ZCL_MY_CLASS --file /tmp/zcl.abap --yes  # skip confirm (trusted automation only)
-python3 "$SAP_CLI" activate class ZCL_MY_CLASS
-
-# Where-used (read-only)
-python3 "$SAP_CLI" where-used class ZCL_PAYMENT_PROCESSOR --max-results 50
-python3 "$SAP_CLI" where-used interface ZIF_MY_INTERFACE
-
-# Open SQL via Data Preview (read-only)
-python3 "$SAP_CLI" run-sql "SELECT * FROM t001 UP TO 10 ROWS"
-python3 "$SAP_CLI" run-sql "SELECT bukrs, butxt FROM t001 WHERE spras = 'EN'" --max-rows 200
-
-# Transport management
-python3 "$SAP_CLI" configure --platform ecc               # ask the user first; keeps other settings
-python3 "$SAP_CLI" list-transports                        # read-only, but needs platform set
-python3 "$SAP_CLI" list-transports --user SHREK --status D
-
-# create — the required option depends on the platform
-python3 "$SAP_CLI" create-transport --description "Fix rounding issue" --target QAS      # S/4HANA
-python3 "$SAP_CLI" create-transport --description "Fix rounding issue" --package ZMM     # ECC
-
-python3 "$SAP_CLI" release-transport DEVK900001           # S/4HANA only — not available on ECC
-python3 "$SAP_CLI" release-transport DEVK900001 --yes     # skip confirm (trusted automation only)
-```
-
----
-
-## Key Behaviors & Gotchas
-
-- **Object names**: SAP names are case-insensitive but always use **UPPERCASE** for reliability (e.g. `VBAK`, `ZCL_MY_CLASS`, not `vbak`)
-- **Source output**: `get-program`, `get-class`, `get-function`, etc. return raw ABAP source text
-- **XML output**: `get-table`, `get-structure`, `get-type-info`, `get-transaction`, `search-object` return raw XML from ADT — parse it or read it as-is
-- **JSON output**: `get-package` is the only command that returns a parsed JSON array
-- **`get-type-info` fallback**: tries domain first; if not found, falls back to data element
-- **SSL**: for internal SAP systems with self-signed certs, configure with SSL disabled (`SAP_VERIFY_SSL=0` or answer "n" in wizard)
-- **Session reuse**: the HTTP session is reused within a single script invocation; each `python3 "$SAP_CLI" ...` call starts fresh
-- **Credentials precedence**: process env vars > SKILL-local `.env` > `~/.sap-adt-cli/config.json`
-- **Capability flags — config layer**: `write-source` and `activate` require `allow_write: true`;
-  `create-transport` and `release-transport` require `allow_transport: true`.
-  Run `configure` to enable. `list-transports` is read-only and has no flag requirement.
-- **One-time confirmation — execution layer**: every write/create/release operation
-  shows a change preview and requires `[y/N]` confirmation before executing.
-  This confirmation is **scoped to the current operation only** — it is immediately
-  discarded after use and never cached or reused within the same session.
-  The next write/create/release in the same session requires a fresh confirmation.
-- **Agent rule — never reuse confirmation**: when operating as an AI agent,
-  do not infer that a previous confirmation covers subsequent operations.
-  Every invocation of a write-capable command is independent.
-  Pass `--yes` only with explicit user instruction for that specific call.
-- **`write-source` lock protocol**: flow is lock → PUT → unlock; unlock runs in
-  `finally` so objects are never left locked after an error.
-- **`release-transport` is irreversible**: once released, a transport cannot be
-  recalled. The confirmation preview explicitly calls this out.
-- **Transport endpoints are release-specific**: ADT registers the CTS resources
-  under different URLs depending on the backend, which is why `platform` must be
-  set. On S/4HANA the transport organizer lives at
-  `/sap/bc/adt/cts/transportrequests`. On ECC that URI is not registered at all —
-  only `/sap/bc/adt/cts/transports` (list via `?_action=FIND`, create via POST)
-  and `/sap/bc/adt/cts/transportchecks` are. A 404 reading
-  `No suitable resource found` means the URI is not registered for that release;
-  an HTML "Service cannot be reached" page means the ICF node itself is missing.
-- **Not every ADT service exists on ECC.** Confirmed absent on an ECC 6.0
-  backend (all return 404 `No suitable resource found`): `datapreview`
-  (so `run-sql` is unavailable), `checkruns` (so `syntax-check` is unavailable),
-  `cts/transportrequests`, and the transport release endpoint. Reads, search,
-  `create-program`, `write-source`, `activate`, `where-used`, `transportchecks`
-  and the ECC transport create/list paths all work. Probe rather than assume.
-- **`create-program` seeds differently per backend**: on ECC the new shell
-  already contains a header comment block and `REPORT <name>.`, so it activates
-  as-is; elsewhere the source may be empty and need `write-source` first. Check
-  with `get-program` before assuming.
-- **ECC transport quirks**: the target system is derived from the package, not
-  passed; the request type is always `K` (Workbench); `--status R` usually
-  returns nothing because the backend's FIND returns only modifiable requests;
-  and there is no release endpoint, so releasing must happen in SE01/SE09.
-- **`run-sql` Open SQL only**: uses ADT Data Preview; accepts SAP Open SQL syntax
-  (e.g. `UP TO N ROWS`), not Native SQL or JDBC-style syntax.
-- **`run-sql` DML blocked**: statements starting with `INSERT`, `UPDATE`, `DELETE`,
-  `MODIFY`, or `TRUNCATE` are unconditionally rejected in this version.
-  Only `SELECT` statements are permitted. Detection is by first keyword,
-  case-insensitive — `SELECT` containing write keywords in values is safe.
-- **`where-used` empty result**: returns `[]` — not an error (exit 0).
-- **`get-cds-view` name**: use the CDS entity name (e.g. `ZI_INVENTORY_POSITION`),
-  not the underlying database table name.
-- **`syntax-check` with function**: requires `--group <FG>` (same as `get-function`).
-
----
-
-## Output Format
-
-| Command | Output Format |
-|---------|---------------|
-| Source code commands (`get-program`, `get-class`, `get-function`, `get-include`, `get-interface`, `get-cds-view`, `get-type-group`) | Plain text ABAP source |
-| `get-table`, `get-structure`, `get-type-info`, `get-transaction`, `search-object` | Raw XML |
-| `get-package`, `where-used`, `list-transports`, `run-sql` | JSON array |
-| `syntax-check` | Plain text messages (`[ERROR]`, `[WARNING]`, `[INFO]` prefixed); `"Syntax OK"` if clean |
-| `status` | Plain text key-value pairs |
-
----
-
-## Error Handling
-
-| Error Output | Cause | Action |
-|--------------|-------|--------|
-| `Not configured` | No saved credentials | Guide user through `configure` |
-| `HTTP 401` | Wrong username/password | Ask user to re-run `configure` |
-| `HTTP 403` | Missing ADT authorization | User needs `SAP_ADT_BASE` role or equivalent |
-| `HTTP 404` | Object name not found | Try `search-object` to find the correct name |
-| `HTTP 503` | ADT service not active | SAP Basis must activate `/sap/bc/adt` in transaction SICF |
-| SSL error | Certificate issue | Re-configure with `SAP_VERIFY_SSL=0` |
-
----
-
-## Workflows
-
-**Read an unknown class:**
-```bash
-python3 "$SAP_CLI" search-object "ZCL_ORDER*"
-python3 "$SAP_CLI" get-class ZCL_ORDER_HANDLER
-```
-
-**Explore a package:**
-```bash
-python3 "$SAP_CLI" get-package ZMYPACKAGE
-# → JSON list of all objects; pick the ones you need
-python3 "$SAP_CLI" get-program ZMYREPORT
-python3 "$SAP_CLI" get-class ZCL_MYCLASS
-```
-
-**Look up a BAPI signature:**
-```bash
-python3 "$SAP_CLI" get-function BAPI_SALESORDER_CREATEFROMDAT2 --group BAPI_SD_SALESORDER
-```
-
-**Understand a table structure:**
-```bash
-python3 "$SAP_CLI" get-table VBAK
-python3 "$SAP_CLI" get-type-info VBELN   # look up field type
-```
-
-**Find a transaction's package/application:**
-```bash
-python3 "$SAP_CLI" get-transaction VA01
-```
-
----
-
-**Safe write workflow — syntax-check before writing:**
-```bash
-python3 "$SAP_CLI" syntax-check class ZCL_MY_CLASS
-# → fix any errors locally, then:
-python3 "$SAP_CLI" write-source class ZCL_MY_CLASS --file ./zcl_my_class.abap --activate
-# → preview shown, confirmation required; confirmation discarded after use
-```
-
-**Find all usages of an interface:**
-```bash
-python3 "$SAP_CLI" where-used interface ZIF_MY_INTERFACE --max-results 100
-# → JSON list of all implementing/using objects
-```
-
-**Quick data check without SE16N:**
-```bash
-python3 "$SAP_CLI" run-sql "SELECT COUNT(*) AS CNT FROM ekko WHERE bstyp = 'F'"
-```
-
-**Create and release a transport (two separate confirmations):**
-```bash
-python3 "$SAP_CLI" configure --platform s4   # ask the user which backend first
-python3 "$SAP_CLI" create-transport --description "Sprint 12 — invoice fix" --target QAS
-# → preview shown, confirmation #1 required → Created transport: DEVK900042
-python3 "$SAP_CLI" list-transports --status D
-# → JSON list (read-only, no confirmation)
-python3 "$SAP_CLI" release-transport DEVK900042
-# → irreversible-warning preview shown, confirmation #2 required (fresh, not reused)
-```
-
----
-
-## SAP Prerequisites
-
-- ADT services active: transaction `SICF` → path `/sap/bc/adt` → Activate
-- User authorization: role `SAP_ADT_BASE` or objects `S_ADT_RES`, `S_RFC`
-- **Write & activate** (`write-source`, `activate`): requires `allow_write: true` in config.
-  SAP user additionally needs `S_DEVELOP` with `ACTVT=02` on relevant object types.
-- **Transport management** (`create/release-transport`): requires `allow_transport: true`
-  **and** `platform` set to `s4` or `ecc` in config (ask the user which).
-  SAP user needs `S_CTS_ADMI` or equivalent transport authorization.
-  `list-transports` is read-only and needs no additional flag.
-- **Data Preview** (`run-sql`): requires `/sap/bc/adt/datapreview` active in transaction SICF.
+Errors on stderr: `{ "ok": false, …, "error": {"code","message","http_status","hint"} }`.
+
+| kind | commands | `data` shape |
+|------|----------|--------------|
+| `source` | get-program/class/function-group/function/include/interface/cds-view/type-group | `{source, line_count}`; default output = verbatim source |
+| `fields` | get-table, get-structure | `{fields:[{name,type,length,decimals,is_key,not_null}]}` (S/4 DDL: length null for element refs, listed in `meta.unparsed_types`; no description key) |
+| `objects` | search-object, get-package, where-used | `{objects:[{name,type,uri,package,description}]}`; where-used may add optional `usage_line`/`usage_uri` |
+| `rows` | run-sql | `{columns:[{name,type}], rows:[[…]]}` |
+| `records` | list-transports | `{transports:[{trkorr,description,status,status_text,owner,target,tasks}]}` |
+| `findings` | syntax-check, run-unit-test, run-atc | `{findings:[{severity,text,line,uri}]}` |
+| `scalar` | get-type-info, get-transaction | object dictionary; type info has `resolved_as: domain\|dataelement` |
+| `capabilities` | discovery | `{collections:[{href,title,content_types}]}` (Atom discovery; use `credentials doctor --coverage` for the command matrix) |
+
+> `doctor --coverage` "available" only guarantees the **resource root**
+> exists — discovery omits sub-paths, HTTP methods and required content
+> types. Sub-path moves, GET→POST and content-type mismatches are invisible
+> to it and only real-machine fixture regression catches them.
+
+Format selection: **source defaults to `text` (byte-identical, safe to redirect),
+every other kind defaults to `json`**. Global `-f/--format json|text|xml`
+or `SAP_ADT_FORMAT` (flag wins). `--format xml` returns the original ADT payload
+(escape hatch for parsers). Empty results are still `ok:true`, `row_count:0`, exit 0.
+Full examples: **references/examples.md**.
+
+## Error codes and exit tiers
+
+| Exit | Meaning | Codes |
+|------|---------|-------|
+| 0 | success, including empty results | — |
+| 1 | operational, retryable (9 codes; incl. two release results) | `CSRF_EXPIRED`, `SERVICE_NOT_ACTIVE`, `BAD_REQUEST`, `SERVER_ERROR`, `LOCKED_BY_OTHER`, `NETWORK_ERROR`, `PARSE_FAILED`, `RELEASE_UNVERIFIED`, `RELEASE_REJECTED` |
+| 2 | configuration / credentials | `CONFIG_MISSING`, `PROFILE_NOT_FOUND`, `AUTH_FAILED` |
+| 3 | policy refusal / operation did not happen — **do not retry** | `WRITE_DISABLED`, `TRANSPORT_DISABLED`, `CONFIRM_REQUIRED`, `USER_ABORTED`, `DML_REJECTED` |
+| 4 | requested object does not exist | `OBJECT_NOT_FOUND` |
+
+All 18 codes. **`RELEASE_UNVERIFIED` = release sent, final status unknown
+(readback timeout) — never re-release, verify in SE09/SE10; `RELEASE_REJECTED`
+= still status D / check failed.** Our errors are **JSON envelopes** on stderr;
+Click usage errors are **plain text** (also exit 2 — distinguish by content).
+`OBJECT_NOT_FOUND` needs a 404 `ExceptionResourceNotFound` body (404 "No
+suitable resource" is `BAD_REQUEST`); non-CSRF 403 is `AUTH_FAILED`.
+
+## Command index
+
+| Command | One-liner | kind |
+|---|---|---|
+| `status` | active profile, switches, config source (plain text) | — |
+| `configure [--profile N] [--platform s4\|ecc]` | save a profile (flags = non-interactive JSON; no flags = interactive wizard); omitted flags keep their saved values | — |
+| `profile list\|use\|remove` | manage environments | — |
+| `credentials set\|forget\|status\|doctor [--coverage]` | keystore management; `doctor --coverage` = command/resource matrix for this system | — |
+| `discovery` | ADT resources this system exposes (href/title/content-types) | capabilities |
+| `get-program / -class / -function-group / -function --group / -include / -interface / -cds-view / -type-group` | read source | source |
+| `get-table / get-structure <N>` | DDIC fields (DDL on S/4) | fields |
+| `get-type-info <N>` | domain/data element with `resolved_as` | scalar |
+| `get-transaction <CODE>` | package/application/facets | scalar |
+| `search-object "<PATTERN>" [--max-results N]` | wildcard search (`*`) | objects |
+| `get-package <N>` | package contents | objects |
+| `where-used <TYPE> <N> [--group G] [--max-results N]` | referencing objects | objects |
+| `syntax-check <TYPE> <N> [--group G]` | findings; hard errors exit 1, warnings exit 0 | findings |
+| `run-unit-test <N> [--type T] [--risk-level harmless\|dangerous\|critical] [--duration short\|medium\|long] [--fail-on error\|warning\|info\|never]` | ABAP Unit; harmless default (read-only); meta `no_tests_found` distinguishes "no tests" (total 0) from "all passed" | findings |
+| `run-atc <N> [--type T] [--variant V] [--fail-on …]` | Static ATC checks (no gate); stable `check_id`/`message_id`, priority 1/2/3→error/warning/info; exempted findings auditable but never fail | findings |
+| `run-sql "<SELECT>" [--max-rows N]` | Open SQL preview; SELECT only; `--max-rows` (rowNumber) is the hard cap and overrides SQL `UP TO N ROWS` — conflicts flagged in `meta.row_limit_conflict` | rows |
+| `list-transports [--user U] [--status D\|R]` | transport tree (read-only); needs `platform`; ECC lists via `_action=FIND` (modifiable requests only) | records |
+| `create-program <N> --description D --package P [--transport T] [--type T] [--yes]` | empty program shell; non-`$TMP` package needs `--transport`; ECC seeds a header + `REPORT` line, other releases may leave it empty — check with get-program before write-source | gated |
+| `set-program-ldb <N> [--ldb L] [--transport T] [--yes]` | set or blank the program's logical database attribute (metadata lock→PUT→unlock) | gated |
+| `write-source <TYPE> <N> --file F [--group G] [--transport T] [--activate] [--yes]` | stateful `_action=LOCK`→PUT→`_action=UNLOCK` in `finally` (real-verified Basis 7.56, 2026-09-16) | gated |
+| `activate <TYPE> <N> [--group G] [--yes]` | `?method=activate`; no lock/shared session needed, succeeds in a separate process (real-verified Basis 7.56) | gated |
+| `create-transport --package P --description D [--ref URI] [--yes]` | needs `platform`. S/4: CreateCorrectionRequest ASX (`DEVCLASS`+`REF` required, `$TMP`=local; real-verified Basis 7.56, 2026-09-17). ECC: `DEVCLASS` only, no `--ref`; target derived from the package, always Workbench | gated |
+| `release-transport <TRKORR> [--dry-run] [--yes]` | release with TRSTATUS readback (2s poll, 120s); dry-run = preflight only; **S/4 only** — ECC has no ADT release endpoint (use SE01/SE09) | gated |
+
+> **Unit risk levels**: `dangerous`/`critical` tests execute ABAP that may
+> modify business data — require `allow_write`, a risk/object/data-change
+> warning in `[y/N]`, and are hard-refused on `environment=prd`. Empty
+> `runResult` → `ok:true, no_tests_found:true, total:0` (same for an
+> alert-only defective test class, with warning findings).
+
+## Safety gates (do not weaken)
+
+- Capabilities are **profile-scoped** (`configure --allow-write/--allow-transport`
+  write the profile section). The top-level `--global-allow-*` switches are a
+  legacy fallback used only when the profile declares neither. Agents should
+  always use the profile scope.
+- Each profile has `environment: dev|qas|prd` (`--environment`; default inferred
+  loosely from the name: contains `prd`/`prod`→prd, `qas`/`qa`→qas, else dev;
+  `reproduce` matches `prod` by design — a false prd only blocks, use `--environment dev`).
+- **environment=prd hard-refuses ALL writes** (write/activate/create/release,
+  dangerous/critical Unit): no prompt, no flag override → exit 3; inferred-prd
+  hints explain how to override via `--environment dev`.
+- Off flags → exit 3 before any HTTP call. Every write/create/release then
+  shows a preview and requires a fresh `[y/N]`, used for one operation only,
+  never cached/reused even within the conversation.
+- Non-interactive stdin without `--yes` → `CONFIRM_REQUIRED` (exit 3); N → `USER_ABORTED`.
+- **Env/.env writes**: `SAP_ALLOW_WRITE/TRANSPORT=true` requires `SAP_ENVIRONMENT`
+  explicitly (nothing to infer from), else `CONFIG_MISSING` exit 3; `…=prd` refuses.
+- **Ask which backend before any transport command.** ADT exposes the Change &
+  Transport System at different URLs on S/4HANA and ECC, so `list-transports`,
+  `create-transport` and `release-transport` exit 2 `CONFIG_MISSING` until the
+  profile has a platform. **Ask the user whether the system is S/4HANA or ECC** —
+  never infer it from the hostname, SID, package names or another profile — then
+  run `configure --platform s4` or `configure --platform ecc` (keeps every other
+  saved setting; env path: `SAP_PLATFORM`). `status` shows the current value.
+- **Ask, do not infer, before an object-creating write.** `create-program`
+  (package, description, transport, program type) and `create-transport`
+  (package, description; on S/4 also the object `--ref`) take values that belong
+  to the user: ask, batched into one question. Never copy a package from a
+  similarly named object or invent a description from a naming convention — a
+  wrong package fixes the transport layer and can strand the object. Reading the
+  system to *offer* choices (candidate packages from `TADIR`, `/cts/transportchecks`)
+  is encouraged; the user still picks.
+- `run-sql` blocks non-SELECT DML before sending (`DML_REJECTED`, exit 3).
+- write-source always unlocks (`_action=UNLOCK`, handle via query) in `finally`; release-transport cannot be undone. **Write-side 2xx = "accepted" only** — release/activate/unlock need independent readback (**references/adt_api.md** top rule); foreign-context unlock is a silent 200 no-op.
+
+## References (load on demand)
+
+Layers: this file = operational contract; `references/` = task detail; the bundled `docs` folder = project history for humans. Links point only inward, and no behavior rule is more than one hop away.
+
+- `references/credentials.md` — first-time setup, keystore backends, `.env`/env overrides, credential commands
+- `references/profiles.md` — multi-environment management and agent rules
+- `references/examples.md` — all command examples and workflows
+- `references/adt_api.md` — endpoint reference incl. verified S/4HANA 2021 protocol facts (old→new, dated) and the ECC differences (transport endpoints, missing services, program creation)
